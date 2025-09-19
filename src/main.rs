@@ -12,13 +12,13 @@ use crate::error::NanogetError;
 
 fn main() -> Result<(), NanogetError> {
     env_logger::init();
-    
+
     let cli = Cli::parse();
-    
+
     match cli.command {
         Commands::Extract(args) => {
             let metrics = extract::extract_metrics(&args)?;
-            
+
             // Output results based on format
             match args.output_format.as_str() {
                 "json" => println!("{}", serde_json::to_string_pretty(&metrics)?),
@@ -30,6 +30,6 @@ fn main() -> Result<(), NanogetError> {
             }
         }
     }
-    
+
     Ok(())
 }

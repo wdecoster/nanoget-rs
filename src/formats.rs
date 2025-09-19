@@ -26,7 +26,7 @@ impl FileType {
     #[allow(dead_code)]
     pub fn from_extension(path: &std::path::Path) -> Option<Self> {
         let extension = path.extension()?.to_str()?.to_lowercase();
-        
+
         match extension.as_str() {
             "fastq" | "fq" => Some(Self::Fastq),
             "fasta" | "fa" | "fas" => Some(Self::Fasta),
@@ -43,7 +43,7 @@ impl FileType {
             _ => None,
         }
     }
-    
+
     /// Check if the file type supports parallel processing
     #[allow(dead_code)]
     pub fn supports_parallel(&self) -> bool {
@@ -62,9 +62,18 @@ mod tests {
 
     #[test]
     fn test_file_type_detection() {
-        assert_eq!(FileType::from_extension(Path::new("test.fastq")), Some(FileType::Fastq));
-        assert_eq!(FileType::from_extension(Path::new("test.bam")), Some(FileType::Bam));
-        assert_eq!(FileType::from_extension(Path::new("sequencing_summary.txt")), Some(FileType::Summary));
+        assert_eq!(
+            FileType::from_extension(Path::new("test.fastq")),
+            Some(FileType::Fastq)
+        );
+        assert_eq!(
+            FileType::from_extension(Path::new("test.bam")),
+            Some(FileType::Bam)
+        );
+        assert_eq!(
+            FileType::from_extension(Path::new("sequencing_summary.txt")),
+            Some(FileType::Summary)
+        );
         assert_eq!(FileType::from_extension(Path::new("test.unknown")), None);
     }
 }

@@ -3,11 +3,19 @@ name = "nanoget-rs"
 version = "0.1.0"
 edition = "2021"
 authors = ["Wouter De Coster <decosterwouter@gmail.com>"]
-description = "Extract metrics from Oxford Nanopore sequencing data and alignments"
-license = "GPL-3.0"
+description = "Fast extraction of metrics from Oxford Nanopore sequencing data and alignments"
+license = "MIT"
 repository = "https://github.com/wdecoster/nanoget-rs"
-keywords = ["nanopore", "sequencing", "bioinformatics", "metrics"]
-categories = ["science"]
+homepage = "https://github.com/wdecoster/nanoget-rs"
+documentation = "https://docs.rs/nanoget-rs"
+keywords = ["nanopore", "sequencing", "bioinformatics", "metrics", "genomics"]
+categories = ["science", "command-line-utilities"]
+readme = "README.md"
+exclude = [
+    "test_data.fastq",
+    "example_library_usage.rs",
+    "simple_example.rs",
+]
 
 [dependencies]
 # Command line interface

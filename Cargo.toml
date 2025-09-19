@@ -53,7 +53,7 @@ rayon = "1.8"
 statrs = "0.16"
 
 # Progress bars
-indicatif = { version = "0.17", features = ["rayon"] }
+indicatif = { version = "0.18", features = ["rayon"] }
 
 # DateTime handling
 chrono = { version = "0.4", features = ["serde"] }

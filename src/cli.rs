@@ -30,7 +30,7 @@ pub struct ExtractArgs {
     #[arg(short = 'j', long, default_value = "4")]
     pub threads: usize,
 
-    /// Output format (json, csv, tsv)
+    /// Output format (json, tsv)
     #[arg(short = 'f', long, default_value = "json")]
     pub output_format: String,
 

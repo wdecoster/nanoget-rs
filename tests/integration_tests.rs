@@ -196,3 +196,34 @@ fn test_track_combination() {
     assert_eq!(sample1_reads.len(), 2);
     assert_eq!(sample2_reads.len(), 2);
 }
+
+#[test]
+fn test_tsv_output_format() {
+    let temp_file = create_test_fastq();
+
+    let args = ExtractArgs {
+        files: vec![temp_file.path().to_path_buf()],
+        file_type: FileType::Fastq,
+        threads: 1,
+        output_format: "tsv".to_string(),
+        output: None,
+        read_type: "1D".to_string(),
+        barcoded: false,
+        keep_supplementary: true,
+        huge: false,
+        combine: "simple".to_string(),
+        names: None,
+    };
+
+    let metrics = extract_metrics(&args).expect("Failed to extract metrics");
+    let tsv_output = metrics.to_tsv().expect("Failed to generate TSV output");
+
+    // Check TSV format
+    assert!(tsv_output.contains("read_id\tlength\tquality")); // Header with tabs
+    assert!(tsv_output.contains("read1\t100\t")); // Data with tabs
+    assert!(tsv_output.contains("read2\t99\t")); // Data with tabs
+    assert!(tsv_output.contains("# Summary Statistics")); // Summary section
+    assert!(tsv_output.contains("# Total reads: 2")); // Read count
+    assert!(tsv_output.contains("# Length stats")); // Stats header
+    assert!(tsv_output.contains("# Quality stats")); // Quality stats since FASTQ has quality
+}

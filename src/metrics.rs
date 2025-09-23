@@ -1,7 +1,7 @@
+use crate::error::NanogetError;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use crate::error::NanogetError;
 
 /// Represents the metrics extracted from a single read
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -223,34 +223,46 @@ impl MetricsCollection {
     /// Export to TSV format
     pub fn to_tsv(&self) -> Result<String, NanogetError> {
         let mut output = String::new();
-        
+
         // Header row for individual reads
         output.push_str("read_id\tlength\tquality\taligned_length\taligned_quality\tmapping_quality\tpercent_identity\tchannel_id\tstart_time\tduration\tbarcode\trun_id\tdataset\n");
-        
+
         // Individual read data
         for read in &self.reads {
             output.push_str(&format!(
                 "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
                 read.read_id.as_deref().unwrap_or(""),
                 read.length,
-                read.quality.map(|q| format!("{:.3}", q)).unwrap_or_default(),
-                read.aligned_length.map(|l| l.to_string()).unwrap_or_default(),
-                read.aligned_quality.map(|q| format!("{:.3}", q)).unwrap_or_default(),
-                read.mapping_quality.map(|q| q.to_string()).unwrap_or_default(),
-                read.percent_identity.map(|p| format!("{:.3}", p)).unwrap_or_default(),
+                read.quality
+                    .map(|q| format!("{:.3}", q))
+                    .unwrap_or_default(),
+                read.aligned_length
+                    .map(|l| l.to_string())
+                    .unwrap_or_default(),
+                read.aligned_quality
+                    .map(|q| format!("{:.3}", q))
+                    .unwrap_or_default(),
+                read.mapping_quality
+                    .map(|q| q.to_string())
+                    .unwrap_or_default(),
+                read.percent_identity
+                    .map(|p| format!("{:.3}", p))
+                    .unwrap_or_default(),
                 read.channel_id.map(|c| c.to_string()).unwrap_or_default(),
                 read.start_time.map(|t| t.to_rfc3339()).unwrap_or_default(),
-                read.duration.map(|d| format!("{:.3}", d)).unwrap_or_default(),
+                read.duration
+                    .map(|d| format!("{:.3}", d))
+                    .unwrap_or_default(),
                 read.barcode.as_deref().unwrap_or(""),
                 read.run_id.as_deref().unwrap_or(""),
                 read.dataset.as_deref().unwrap_or("")
             ));
         }
-        
+
         // Add summary statistics as a comment section
         output.push_str("\n# Summary Statistics\n");
         output.push_str(&format!("# Total reads: {}\n", self.summary.read_count));
-        
+
         // Length statistics
         output.push_str(&format!(
             "# Length stats - count: {}, mean: {:.2}, median: {:.2}, min: {:.2}, max: {:.2}, std_dev: {:.2}, q25: {:.2}, q75: {:.2}\n",
@@ -263,7 +275,7 @@ impl MetricsCollection {
             self.summary.length_stats.q25,
             self.summary.length_stats.q75
         ));
-        
+
         // Quality statistics if available
         if let Some(quality_stats) = &self.summary.quality_stats {
             output.push_str(&format!(
@@ -278,7 +290,7 @@ impl MetricsCollection {
                 quality_stats.q75
             ));
         }
-        
+
         // Mapping quality statistics if available
         if let Some(mapping_quality_stats) = &self.summary.mapping_quality_stats {
             output.push_str(&format!(
@@ -293,7 +305,7 @@ impl MetricsCollection {
                 mapping_quality_stats.q75
             ));
         }
-        
+
         // Percent identity statistics if available
         if let Some(percent_identity_stats) = &self.summary.percent_identity_stats {
             output.push_str(&format!(
@@ -308,7 +320,7 @@ impl MetricsCollection {
                 percent_identity_stats.q75
             ));
         }
-        
+
         Ok(output)
     }
 }
@@ -518,22 +530,21 @@ mod tests {
 
     #[test]
     fn test_tsv_output() {
-        let read1 = ReadMetrics::new(Some("read1".to_string()), 1000)
-            .with_quality(35.5);
+        let read1 = ReadMetrics::new(Some("read1".to_string()), 1000).with_quality(35.5);
         let read2 = ReadMetrics::new(Some("read2".to_string()), 2000)
             .with_quality(40.0)
             .with_alignment(1900, Some(41.0), Some(60), Some(95.5));
-        
+
         let metrics = MetricsCollection::new(vec![read1, read2]);
         let tsv_output = metrics.to_tsv().unwrap();
-        
+
         // Check that it contains the header
         assert!(tsv_output.contains("read_id\tlength\tquality"));
-        
+
         // Check that it contains the read data with tabs
         assert!(tsv_output.contains("read1\t1000\t35.500"));
         assert!(tsv_output.contains("read2\t2000\t40.000"));
-        
+
         // Check that it contains summary statistics
         assert!(tsv_output.contains("# Summary Statistics"));
         assert!(tsv_output.contains("# Total reads: 2"));

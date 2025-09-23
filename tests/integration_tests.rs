@@ -205,7 +205,6 @@ fn test_tsv_output_format() {
         read_type: "1D".to_string(),
         barcoded: false,
         keep_supplementary: true,
-        huge: false,
         combine: "simple".to_string(),
         names: None,
     };

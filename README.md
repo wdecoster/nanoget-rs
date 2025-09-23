@@ -85,11 +85,6 @@ Use multiple threads:
 nanoget extract -t fastq reads.fastq -j 8
 ```
 
-Process huge files without parallelization:
-```bash
-nanoget extract -t fastq huge_file.fastq --huge
-```
-
 For BAM files, keep supplementary alignments:
 ```bash
 nanoget extract -t bam alignments.bam --keep-supplementary

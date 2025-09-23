@@ -50,10 +50,6 @@ pub struct ExtractArgs {
     #[arg(long, default_value = "true")]
     pub keep_supplementary: bool,
 
-    /// Process huge files without parallelization
-    #[arg(long)]
-    pub huge: bool,
-
     /// Combine multiple files: simple or track
     #[arg(long, default_value = "simple")]
     pub combine: String,

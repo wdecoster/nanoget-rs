@@ -28,7 +28,6 @@ fn test_fastq_extraction() {
         read_type: "1D".to_string(),
         barcoded: false,
         keep_supplementary: true,
-        huge: false,
         combine: "simple".to_string(),
         names: None,
     };
@@ -67,7 +66,6 @@ fn test_fastq_minimal() {
         read_type: "1D".to_string(),
         barcoded: false,
         keep_supplementary: true,
-        huge: false,
         combine: "simple".to_string(),
         names: None,
     };
@@ -103,7 +101,6 @@ fn test_fasta_extraction() {
         read_type: "1D".to_string(),
         barcoded: false,
         keep_supplementary: true,
-        huge: false,
         combine: "simple".to_string(),
         names: None,
     };
@@ -141,7 +138,6 @@ fn test_multiple_files_combination() {
         read_type: "1D".to_string(),
         barcoded: false,
         keep_supplementary: true,
-        huge: false,
         combine: "simple".to_string(),
         names: None,
     };
@@ -170,7 +166,6 @@ fn test_track_combination() {
         read_type: "1D".to_string(),
         barcoded: false,
         keep_supplementary: true,
-        huge: false,
         combine: "track".to_string(),
         names: Some(vec!["sample1".to_string(), "sample2".to_string()]),
     };

@@ -21,28 +21,18 @@ pub fn extract_metrics(args: &ExtractArgs) -> Result<MetricsCollection, NanogetE
     }
 
     // Determine processing strategy based on file type and options
-    let collections = if args.huge && args.files.len() > 1 {
-        return Err(NanogetError::InvalidInput(
-            "Multiple huge files are not currently supported".to_string(),
-        ));
-    } else if args.huge {
-        // Process single huge file without parallelization
-        info!("Processing huge file without parallelization");
-        vec![process_single_file(&args.files[0], &args.file_type, args)?]
-    } else {
-        // Process files in parallel
-        let thread_pool = rayon::ThreadPoolBuilder::new()
-            .num_threads(args.threads)
-            .build()
-            .map_err(|e| NanogetError::ProcessingError(e.to_string()))?;
+    // Process files in parallel
+    let thread_pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(args.threads)
+        .build()
+        .map_err(|e| NanogetError::ProcessingError(e.to_string()))?;
 
-        thread_pool.install(|| {
-            args.files
-                .par_iter()
-                .map(|file| process_single_file(file, &args.file_type, args))
-                .collect::<Result<Vec<_>, _>>()
-        })?
-    };
+    let collections = thread_pool.install(|| {
+        args.files
+            .par_iter()
+            .map(|file| process_single_file(file, &args.file_type, args))
+            .collect::<Result<Vec<_>, _>>()
+    })?;
 
     // Combine results
     let combined = MetricsCollection::combine(collections, &args.combine, args.names.clone());

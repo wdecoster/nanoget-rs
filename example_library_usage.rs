@@ -14,7 +14,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         read_type: "1D".to_string(),
         barcoded: false,
         keep_supplementary: true,
-        huge: false,
         combine: "simple".to_string(),
         names: None,
     };
@@ -50,7 +49,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         read_type: "1D".to_string(),
         barcoded: false,
         keep_supplementary: true,
-        huge: false,
         combine: "track".to_string(),
         names: Some(vec!["Sample1".to_string(), "Sample2".to_string()]),
     };

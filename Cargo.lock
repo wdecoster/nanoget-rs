@@ -2360,7 +2360,7 @@ version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "36f0bbd478583f79edad978b407914f61b2972f5af6fa089686016be8f9af595"
 dependencies = [
- "displaydo
+ "displaydoc",
  "yoke",
  "zerofrom",
 ]

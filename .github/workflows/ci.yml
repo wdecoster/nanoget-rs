@@ -18,7 +18,7 @@ jobs:
         rust: [stable, beta, nightly]
     
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v5
     
     - name: Install Rust
       uses: dtolnay/rust-toolchain@master
@@ -63,7 +63,7 @@ jobs:
     if: github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main'
     
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v5
     
     - name: Install Rust
       uses: dtolnay/rust-toolchain@stable
@@ -80,7 +80,7 @@ jobs:
       run: cargo tarpaulin --verbose --all-features --workspace --timeout 120 --out xml
     
     - name: Upload to codecov.io
-      uses: codecov/codecov-action@v4
+      uses: codecov/codecov-action@v5
       with:
         fail_ci_if_error: false
 
@@ -89,7 +89,7 @@ jobs:
     runs-on: ubuntu-latest
     
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v5
     
     - name: Install Rust
       uses: dtolnay/rust-toolchain@stable

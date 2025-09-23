@@ -1,6 +1,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use crate::error::NanogetError;
 
 /// Represents the metrics extracted from a single read
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -218,6 +219,98 @@ impl MetricsCollection {
     pub fn to_json_compact(&self) -> Result<String, serde_json::Error> {
         serde_json::to_string(self)
     }
+
+    /// Export to TSV format
+    pub fn to_tsv(&self) -> Result<String, NanogetError> {
+        let mut output = String::new();
+        
+        // Header row for individual reads
+        output.push_str("read_id\tlength\tquality\taligned_length\taligned_quality\tmapping_quality\tpercent_identity\tchannel_id\tstart_time\tduration\tbarcode\trun_id\tdataset\n");
+        
+        // Individual read data
+        for read in &self.reads {
+            output.push_str(&format!(
+                "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+                read.read_id.as_deref().unwrap_or(""),
+                read.length,
+                read.quality.map(|q| format!("{:.3}", q)).unwrap_or_default(),
+                read.aligned_length.map(|l| l.to_string()).unwrap_or_default(),
+                read.aligned_quality.map(|q| format!("{:.3}", q)).unwrap_or_default(),
+                read.mapping_quality.map(|q| q.to_string()).unwrap_or_default(),
+                read.percent_identity.map(|p| format!("{:.3}", p)).unwrap_or_default(),
+                read.channel_id.map(|c| c.to_string()).unwrap_or_default(),
+                read.start_time.map(|t| t.to_rfc3339()).unwrap_or_default(),
+                read.duration.map(|d| format!("{:.3}", d)).unwrap_or_default(),
+                read.barcode.as_deref().unwrap_or(""),
+                read.run_id.as_deref().unwrap_or(""),
+                read.dataset.as_deref().unwrap_or("")
+            ));
+        }
+        
+        // Add summary statistics as a comment section
+        output.push_str("\n# Summary Statistics\n");
+        output.push_str(&format!("# Total reads: {}\n", self.summary.read_count));
+        
+        // Length statistics
+        output.push_str(&format!(
+            "# Length stats - count: {}, mean: {:.2}, median: {:.2}, min: {:.2}, max: {:.2}, std_dev: {:.2}, q25: {:.2}, q75: {:.2}\n",
+            self.summary.length_stats.count,
+            self.summary.length_stats.mean,
+            self.summary.length_stats.median,
+            self.summary.length_stats.min,
+            self.summary.length_stats.max,
+            self.summary.length_stats.std_dev,
+            self.summary.length_stats.q25,
+            self.summary.length_stats.q75
+        ));
+        
+        // Quality statistics if available
+        if let Some(quality_stats) = &self.summary.quality_stats {
+            output.push_str(&format!(
+                "# Quality stats - count: {}, mean: {:.2}, median: {:.2}, min: {:.2}, max: {:.2}, std_dev: {:.2}, q25: {:.2}, q75: {:.2}\n",
+                quality_stats.count,
+                quality_stats.mean,
+                quality_stats.median,
+                quality_stats.min,
+                quality_stats.max,
+                quality_stats.std_dev,
+                quality_stats.q25,
+                quality_stats.q75
+            ));
+        }
+        
+        // Mapping quality statistics if available
+        if let Some(mapping_quality_stats) = &self.summary.mapping_quality_stats {
+            output.push_str(&format!(
+                "# Mapping quality stats - count: {}, mean: {:.2}, median: {:.2}, min: {:.2}, max: {:.2}, std_dev: {:.2}, q25: {:.2}, q75: {:.2}\n",
+                mapping_quality_stats.count,
+                mapping_quality_stats.mean,
+                mapping_quality_stats.median,
+                mapping_quality_stats.min,
+                mapping_quality_stats.max,
+                mapping_quality_stats.std_dev,
+                mapping_quality_stats.q25,
+                mapping_quality_stats.q75
+            ));
+        }
+        
+        // Percent identity statistics if available
+        if let Some(percent_identity_stats) = &self.summary.percent_identity_stats {
+            output.push_str(&format!(
+                "# Percent identity stats - count: {}, mean: {:.2}, median: {:.2}, min: {:.2}, max: {:.2}, std_dev: {:.2}, q25: {:.2}, q75: {:.2}\n",
+                percent_identity_stats.count,
+                percent_identity_stats.mean,
+                percent_identity_stats.median,
+                percent_identity_stats.min,
+                percent_identity_stats.max,
+                percent_identity_stats.std_dev,
+                percent_identity_stats.q25,
+                percent_identity_stats.q75
+            ));
+        }
+        
+        Ok(output)
+    }
 }
 
 /// Summary statistics for a collection of reads
@@ -421,5 +514,30 @@ mod tests {
         assert_eq!(metrics.quality, Some(35.0));
         assert_eq!(metrics.aligned_length, Some(950));
         assert_eq!(metrics.percent_identity, Some(95.5));
+    }
+
+    #[test]
+    fn test_tsv_output() {
+        let read1 = ReadMetrics::new(Some("read1".to_string()), 1000)
+            .with_quality(35.5);
+        let read2 = ReadMetrics::new(Some("read2".to_string()), 2000)
+            .with_quality(40.0)
+            .with_alignment(1900, Some(41.0), Some(60), Some(95.5));
+        
+        let metrics = MetricsCollection::new(vec![read1, read2]);
+        let tsv_output = metrics.to_tsv().unwrap();
+        
+        // Check that it contains the header
+        assert!(tsv_output.contains("read_id\tlength\tquality"));
+        
+        // Check that it contains the read data with tabs
+        assert!(tsv_output.contains("read1\t1000\t35.500"));
+        assert!(tsv_output.contains("read2\t2000\t40.000"));
+        
+        // Check that it contains summary statistics
+        assert!(tsv_output.contains("# Summary Statistics"));
+        assert!(tsv_output.contains("# Total reads: 2"));
+        assert!(tsv_output.contains("# Length stats"));
+        assert!(tsv_output.contains("# Quality stats"));
     }
 }

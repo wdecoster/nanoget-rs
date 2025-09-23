@@ -19,14 +19,18 @@ fn main() -> Result<(), NanogetError> {
         Commands::Extract(args) => {
             let metrics = extract::extract_metrics(&args)?;
 
-            // Output results based on format
-            match args.output_format.as_str() {
-                "json" => println!("{}", serde_json::to_string_pretty(&metrics)?),
-                "csv" => {
-                    // TODO: Implement CSV output
-                    println!("CSV output not yet implemented");
-                }
-                _ => println!("{:#?}", metrics),
+            // Generate output based on format
+            let output = match args.output_format.as_str() {
+                "json" => serde_json::to_string_pretty(&metrics)?,
+                "tsv" => metrics.to_tsv()?,
+                _ => format!("{:#?}", metrics),
+            };
+
+            // Write to file or stdout
+            if let Some(output_path) = &args.output {
+                std::fs::write(output_path, output)?;
+            } else {
+                println!("{}", output);
             }
         }
     }

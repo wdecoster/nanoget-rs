@@ -56,9 +56,9 @@ nanoget extract -t summary sequencing_summary.txt
 
 ### Output formats
 
-By default, output is in JSON format. You can also specify CSV:
+By default, output is in JSON format. You can also specify TSV:
 ```bash
-nanoget extract -t fastq reads.fastq -f csv
+nanoget extract -t fastq reads.fastq -f tsv
 ```
 
 Save output to a file:

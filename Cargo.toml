@@ -22,7 +22,7 @@ exclude = [
 clap = { version = "4.5", features = ["derive"] }
 
 # File I/O and compression
-flate2 = "1.0"
+flate2 = "1.1"
 bzip2 = "0.6"
 
 # BAM/SAM/CRAM file handling

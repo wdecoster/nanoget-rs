@@ -26,7 +26,7 @@ flate2 = "1.1"
 bzip2 = "0.6"
 
 # BAM/SAM/CRAM file handling
-rust-htslib = "0.50"
+rust-htslib = "0.51"
 
 # FASTQ/FASTA parsing
 bio = "3.0"

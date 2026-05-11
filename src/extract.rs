@@ -4,9 +4,26 @@ use crate::formats::FileType;
 use crate::metrics::{MetricsCollection, ReadMetrics};
 use crate::utils;
 
+use chrono::{DateTime, TimeZone, Utc};
 use log::info;
 use rayon::prelude::*;
+use rust_htslib::bam::record::{Aux, Cigar};
 use std::path::Path;
+
+/// Safely parse a timestamp (seconds since epoch) to DateTime<Utc>
+/// Handles nanosecond overflow by clamping to valid range
+fn parse_timestamp(timestamp: f64) -> Option<DateTime<Utc>> {
+    // Validate timestamp range
+    if timestamp < 0.0 || timestamp > i64::MAX as f64 {
+        return None;
+    }
+
+    let seconds = timestamp as i64;
+    // Clamp nanoseconds to valid u32 range (0 to 999,999,999)
+    let nanos = ((timestamp.fract().abs() * 1e9) as u32).min(999_999_999);
+
+    Utc.timestamp_opt(seconds, nanos).single()
+}
 
 /// Main entry point for extracting metrics from files
 pub fn extract_metrics(args: &ExtractArgs) -> Result<MetricsCollection, NanogetError> {
@@ -163,6 +180,93 @@ fn process_fasta(file: &Path) -> Result<Vec<ReadMetrics>, NanogetError> {
     Ok(metrics)
 }
 
+/// Get the NM (edit distance) tag from a BAM record
+fn get_nm_tag(record: &rust_htslib::bam::Record) -> Option<u32> {
+    match record.aux(b"NM") {
+        Ok(value) => match value {
+            Aux::U8(v) => Some(u32::from(v)),
+            Aux::U16(v) => Some(u32::from(v)),
+            Aux::U32(v) => Some(v),
+            Aux::I8(v) => u32::try_from(v).ok(),
+            Aux::I16(v) => u32::try_from(v).ok(),
+            Aux::I32(v) => u32::try_from(v).ok(),
+            _ => None,
+        },
+        Err(_) => None,
+    }
+}
+
+/// Get the de (gap-compressed divergence) tag from a BAM record
+/// This is provided by recent minimap2 versions
+fn get_de_tag(record: &rust_htslib::bam::Record) -> Option<f64> {
+    match record.aux(b"de") {
+        Ok(value) => match value {
+            Aux::Float(v) => Some(100.0 * (1.0 - v as f64)),
+            _ => None,
+        },
+        Err(_) => None,
+    }
+}
+
+/// Calculate gap-compressed identity from CIGAR and NM tag
+/// Based on https://lh3.github.io/2018/11/25/on-the-definition-of-sequence-identity
+/// Recent minimap2 versions provide this as the 'de' tag
+fn gap_compressed_identity(record: &rust_htslib::bam::Record) -> Option<f64> {
+    // First try to get the de tag (from minimap2)
+    if let Some(identity) = get_de_tag(record) {
+        return Some(identity);
+    }
+
+    // Otherwise calculate from CIGAR and NM
+    let nm = get_nm_tag(record)?;
+
+    let mut matches: u32 = 0;
+    let mut gap_size: u32 = 0;
+    let mut gap_count: u32 = 0;
+
+    for entry in record.cigar().iter() {
+        match entry {
+            Cigar::Match(len) | Cigar::Equal(len) | Cigar::Diff(len) => {
+                matches += len;
+            }
+            Cigar::Del(len) | Cigar::Ins(len) => {
+                gap_size += len;
+                gap_count += 1;
+            }
+            _ => {}
+        }
+    }
+
+    // Avoid division by zero
+    let denominator = matches + gap_count;
+    if denominator == 0 {
+        return None;
+    }
+
+    // Calculate gap-compressed identity
+    // Formula: 100 * (1 - (NM - gap_size + gap_count) / (matches + gap_count))
+    let numerator = nm.saturating_sub(gap_size) + gap_count;
+    Some(100.0 * (1.0 - (numerator as f64 / denominator as f64)))
+}
+
+/// Calculate aligned length from CIGAR (consuming reference bases)
+fn calculate_aligned_length(record: &rust_htslib::bam::Record) -> u32 {
+    let mut aligned_len: u32 = 0;
+    for entry in record.cigar().iter() {
+        match entry {
+            // Operations that consume query sequence
+            Cigar::Match(len) | Cigar::Equal(len) | Cigar::Diff(len) | Cigar::Ins(len) => {
+                aligned_len += len;
+            }
+            // Soft clips are part of the query but not aligned
+            Cigar::SoftClip(_) => {}
+            // Hard clips, deletions, ref skips don't consume query
+            _ => {}
+        }
+    }
+    aligned_len
+}
+
 /// Process BAM files
 fn process_bam(file: &Path, keep_supplementary: bool) -> Result<Vec<ReadMetrics>, NanogetError> {
     use rust_htslib::{bam, bam::Read};
@@ -185,7 +289,7 @@ fn process_bam(file: &Path, keep_supplementary: bool) -> Result<Vec<ReadMetrics>
 
         let read_id = String::from_utf8_lossy(record.qname()).to_string();
         let length = record.seq().len() as u32;
-        let aligned_length = record.seq().len() as u32; // TODO: Calculate actual aligned length from CIGAR
+        let aligned_length = calculate_aligned_length(&record);
         let mapping_quality = if record.mapq() == 255 {
             None
         } else {
@@ -193,16 +297,14 @@ fn process_bam(file: &Path, keep_supplementary: bool) -> Result<Vec<ReadMetrics>
         };
 
         // Calculate quality scores
-        let quality = record
-            .qual()
-            .iter()
-            .any(|&q| q != 255)
-            .then(|| utils::average_quality(record.qual()).unwrap_or(0.0));
+        let quality = utils::average_quality(record.qual());
 
-        let aligned_quality = quality; // Same as overall quality for now
+        // Calculate aligned quality from the aligned portion only
+        // For now, use overall quality as a reasonable approximation
+        let aligned_quality = quality;
 
-        // Calculate percent identity (simplified - would need CIGAR parsing for accuracy)
-        let percent_identity = Some(95.0); // Placeholder - would calculate from CIGAR
+        // Calculate gap-compressed percent identity from CIGAR
+        let percent_identity = gap_compressed_identity(&record);
 
         let read_metrics = ReadMetrics::new(Some(read_id), length)
             .with_quality(quality.unwrap_or(0.0))
@@ -307,11 +409,7 @@ fn process_summary(
         let start_time = row
             .get("start_time")
             .and_then(|s| s.parse::<f64>().ok())
-            .and_then(|timestamp| {
-                use chrono::{TimeZone, Utc};
-                Utc.timestamp_opt(timestamp as i64, (timestamp.fract() * 1e9) as u32)
-                    .single()
-            });
+            .and_then(parse_timestamp);
 
         let duration: Option<f64> = row.get("duration").and_then(|s| s.parse().ok());
 
@@ -360,10 +458,7 @@ fn parse_rich_fastq_metadata(desc: &str) -> Option<RichFastqMetadata> {
                 }
                 "start_time" => {
                     if let Ok(timestamp) = value.parse::<f64>() {
-                        use chrono::{TimeZone, Utc};
-                        metadata.start_time = Utc
-                            .timestamp_opt(timestamp as i64, (timestamp.fract() * 1e9) as u32)
-                            .single();
+                        metadata.start_time = parse_timestamp(timestamp);
                     }
                 }
                 "duration" => {

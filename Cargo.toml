@@ -52,9 +52,6 @@ rayon = "1.12"
 # Statistics and math
 statrs = "0.18"
 
-# Progress bars
-indicatif = { version = "0.18", features = ["rayon"] }
-
 # DateTime handling
 chrono = { version = "0.4", features = ["serde"] }
 

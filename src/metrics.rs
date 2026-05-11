@@ -387,11 +387,19 @@ impl MetricsSummary {
             None
         };
 
-        // Channel distribution
-        let mut channel_counts = HashMap::new();
+        // Channel and barcode distribution (combined loop for efficiency)
+        let mut channel_counts: HashMap<u16, usize> = HashMap::new();
+        let mut barcode_counts: HashMap<String, usize> = HashMap::new();
         for read in reads {
             if let Some(channel) = read.channel_id {
                 *channel_counts.entry(channel).or_insert(0) += 1;
+            }
+            if let Some(barcode) = &read.barcode {
+                // Use entry API efficiently - only clone when inserting new key
+                barcode_counts
+                    .entry(barcode.clone())
+                    .and_modify(|e| *e += 1)
+                    .or_insert(1);
             }
         }
         let channel_distribution = if !channel_counts.is_empty() {
@@ -399,14 +407,6 @@ impl MetricsSummary {
         } else {
             None
         };
-
-        // Barcode distribution
-        let mut barcode_counts = HashMap::new();
-        for read in reads {
-            if let Some(barcode) = &read.barcode {
-                *barcode_counts.entry(barcode.clone()).or_insert(0) += 1;
-            }
-        }
         let barcode_distribution = if !barcode_counts.is_empty() {
             Some(barcode_counts)
         } else {
@@ -455,7 +455,8 @@ impl StatsSummary {
         }
 
         let mut sorted_values = values.to_vec();
-        sorted_values.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        // Use unwrap_or(Equal) to handle NaN values gracefully
+        sorted_values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
         let count = values.len();
         let mean = values.iter().sum::<f64>() / count as f64;

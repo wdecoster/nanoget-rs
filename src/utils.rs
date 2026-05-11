@@ -18,6 +18,11 @@ pub fn average_quality(qualities: &[u8]) -> Option<f64> {
         return None;
     }
 
+    // Skip if all values are 255 (missing quality indicator in BAM)
+    if qualities.iter().all(|&q| q == 255) {
+        return None;
+    }
+
     // Convert Phred scores to error probabilities
     let error_sum: f64 = qualities
         .iter()
@@ -27,7 +32,16 @@ pub fn average_quality(qualities: &[u8]) -> Option<f64> {
     let avg_error = error_sum / qualities.len() as f64;
 
     // Convert back to Phred score
-    Some(-10.0 * avg_error.log10())
+    // Handle edge cases: if avg_error is 0 or very small, log10 returns -inf
+    // Clamp to a reasonable maximum quality score (e.g., 60)
+    let result = -10.0 * avg_error.log10();
+    if result.is_nan() || result.is_infinite() || result > 60.0 {
+        Some(60.0) // Cap at Q60 for extremely high quality
+    } else if result < 0.0 {
+        Some(0.0) // Floor at Q0
+    } else {
+        Some(result)
+    }
 }
 
 /// Calculate percent identity from CIGAR operations and reference length
@@ -93,61 +107,6 @@ pub fn open_file(path: &Path) -> Result<Box<dyn std::io::Read>, NanogetError> {
     }
 }
 
-/// Memory-efficient string interning for read IDs and other repeated strings
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
-
-#[derive(Default)]
-#[allow(dead_code)]
-pub struct StringInterner {
-    strings: HashMap<String, Arc<str>>,
-}
-
-impl StringInterner {
-    #[allow(dead_code)]
-    pub fn new() -> Self {
-        Self {
-            strings: HashMap::new(),
-        }
-    }
-
-    #[allow(dead_code)]
-    pub fn intern(&mut self, s: String) -> Arc<str> {
-        if let Some(interned) = self.strings.get(&s) {
-            interned.clone()
-        } else {
-            let arc_str: Arc<str> = s.clone().into();
-            self.strings.insert(s, arc_str.clone());
-            arc_str
-        }
-    }
-}
-
-/// Thread-safe string interner
-#[allow(dead_code)]
-pub type ThreadSafeInterner = Arc<Mutex<StringInterner>>;
-
-#[allow(dead_code)]
-pub fn create_interner() -> ThreadSafeInterner {
-    Arc::new(Mutex::new(StringInterner::new()))
-}
-
-/// Progress reporting utilities
-use indicatif::{ProgressBar, ProgressStyle};
-
-#[allow(dead_code)]
-pub fn create_progress_bar(len: u64, message: &str) -> ProgressBar {
-    let pb = ProgressBar::new(len);
-    pb.set_style(
-        ProgressStyle::default_bar()
-            .template("{msg} [{elapsed_precise}] {bar:40.cyan/blue} {pos:>7}/{len:7} {eta}")
-            .unwrap()
-            .progress_chars("##-"),
-    );
-    pb.set_message(message.to_string());
-    pb
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -160,6 +119,20 @@ mod tests {
 
         let empty: Vec<u8> = vec![];
         assert_eq!(average_quality(&empty), None);
+
+        // Test missing quality indicator (255)
+        let missing: Vec<u8> = vec![255, 255, 255];
+        assert_eq!(average_quality(&missing), None);
+
+        // Test very high quality scores (should cap at 60)
+        let very_high: Vec<u8> = vec![93, 93, 93]; // Illumina max
+        let avg_high = average_quality(&very_high).unwrap();
+        assert!(avg_high <= 60.0);
+
+        // Test zero quality scores
+        let zeros: Vec<u8> = vec![0, 0, 0];
+        let avg_zero = average_quality(&zeros).unwrap();
+        assert!((0.0..1.0).contains(&avg_zero));
     }
 
     #[test]

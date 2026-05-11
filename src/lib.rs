@@ -97,7 +97,10 @@ pub mod convenience {
         threads: Option<usize>,
     ) -> Result<MetricsCollection, NanogetError> {
         let mut args = default_args(
-            files.into_iter().map(|p| p.as_ref().to_path_buf()).collect(),
+            files
+                .into_iter()
+                .map(|p| p.as_ref().to_path_buf())
+                .collect(),
             file_type,
         );
         if let Some(t) = threads {

@@ -8,6 +8,7 @@ use chrono::{DateTime, TimeZone, Utc};
 use log::info;
 use rayon::prelude::*;
 use rust_htslib::bam::record::{Aux, Cigar};
+use rust_htslib::bam::Read as BamRead;
 use std::path::Path;
 
 /// Safely parse a timestamp (seconds since epoch) to DateTime<Utc>
@@ -37,19 +38,11 @@ pub fn extract_metrics(args: &ExtractArgs) -> Result<MetricsCollection, NanogetE
         utils::check_file_exists(file)?;
     }
 
-    // Determine processing strategy based on file type and options
-    // Process files in parallel
-    let thread_pool = rayon::ThreadPoolBuilder::new()
-        .num_threads(args.threads)
-        .build()
-        .map_err(|e| NanogetError::ProcessingError(e.to_string()))?;
-
-    let collections = thread_pool.install(|| {
-        args.files
-            .par_iter()
-            .map(|file| process_single_file(file, &args.file_type, args))
-            .collect::<Result<Vec<_>, _>>()
-    })?;
+    let collections = args
+        .files
+        .par_iter()
+        .map(|file| process_single_file(file, &args.file_type, args))
+        .collect::<Result<Vec<_>, _>>()?;
 
     // Combine results
     let combined = MetricsCollection::combine(collections, &args.combine, args.names.clone());
@@ -267,22 +260,82 @@ fn calculate_aligned_length(record: &rust_htslib::bam::Record) -> u32 {
     aligned_len
 }
 
-/// Process BAM files
+/// Process BAM or CRAM files.
+/// Attempts parallel chromosome-level processing via an index (.bai/.crai);
+/// falls back to sequential streaming when no index is present.
 fn process_bam(file: &Path, keep_supplementary: bool) -> Result<Vec<ReadMetrics>, NanogetError> {
-    use rust_htslib::{bam, bam::Read};
+    use rust_htslib::bam;
 
-    let mut bam_reader = bam::Reader::from_path(file)?;
+    match bam::IndexedReader::from_path(file) {
+        Ok(indexed) => process_bam_parallel(file, keep_supplementary, indexed),
+        Err(_) => {
+            info!(
+                "No index found for {}, falling back to sequential read",
+                file.display()
+            );
+            process_bam_sequential(file, keep_supplementary)
+        }
+    }
+}
+
+/// Parallel path: one rayon task per chromosome/contig, each with its own reader.
+fn process_bam_parallel(
+    file: &Path,
+    keep_supplementary: bool,
+    reader: rust_htslib::bam::IndexedReader,
+) -> Result<Vec<ReadMetrics>, NanogetError> {
+
+    let n_targets = reader.header().target_count();
+    if n_targets == 0 {
+        return process_bam_sequential(file, keep_supplementary);
+    }
+
+    info!(
+        "Processing {} using index across {} contigs",
+        file.display(),
+        n_targets
+    );
+
+    let file = file.to_path_buf();
+
+    let chunk_results: Vec<Result<Vec<ReadMetrics>, NanogetError>> = (0..n_targets)
+        .into_par_iter()
+        .map(|tid| {
+            let mut r = rust_htslib::bam::IndexedReader::from_path(&file)?;
+            r.fetch(tid)?;
+            extract_bam_records(&mut r, keep_supplementary)
+        })
+        .collect();
+
+    let mut metrics = Vec::new();
+    for result in chunk_results {
+        metrics.extend(result?);
+    }
+    Ok(metrics)
+}
+
+/// Sequential fallback: streams all records from a plain Reader.
+fn process_bam_sequential(
+    file: &Path,
+    keep_supplementary: bool,
+) -> Result<Vec<ReadMetrics>, NanogetError> {
+    let mut reader = rust_htslib::bam::Reader::from_path(file)?;
+    extract_bam_records(&mut reader, keep_supplementary)
+}
+
+/// Extract ReadMetrics from any type implementing bam::Read.
+fn extract_bam_records<R: BamRead>(
+    reader: &mut R,
+    keep_supplementary: bool,
+) -> Result<Vec<ReadMetrics>, NanogetError> {
     let mut metrics = Vec::new();
 
-    for result in bam_reader.records() {
+    for result in reader.records() {
         let record = result?;
 
-        // Skip unmapped reads
         if record.is_unmapped() {
             continue;
         }
-
-        // Skip supplementary alignments if requested
         if !keep_supplementary && record.is_supplementary() {
             continue;
         }
@@ -295,36 +348,21 @@ fn process_bam(file: &Path, keep_supplementary: bool) -> Result<Vec<ReadMetrics>
         } else {
             Some(record.mapq())
         };
-
-        // Calculate quality scores
         let quality = utils::average_quality(record.qual());
-
-        // Calculate aligned quality from the aligned portion only
-        // For now, use overall quality as a reasonable approximation
-        let aligned_quality = quality;
-
-        // Calculate gap-compressed percent identity from CIGAR
         let percent_identity = gap_compressed_identity(&record);
 
-        let read_metrics = ReadMetrics::new(Some(read_id), length)
-            .with_quality(quality.unwrap_or(0.0))
-            .with_alignment(
-                aligned_length,
-                aligned_quality,
-                mapping_quality,
-                percent_identity,
-            );
-
-        metrics.push(read_metrics);
+        metrics.push(
+            ReadMetrics::new(Some(read_id), length)
+                .with_quality(quality.unwrap_or(0.0))
+                .with_alignment(aligned_length, quality, mapping_quality, percent_identity),
+        );
     }
 
     Ok(metrics)
 }
 
-/// Process CRAM files (similar to BAM)
+/// Process CRAM files — same index-then-fallback logic as BAM.
 fn process_cram(file: &Path, keep_supplementary: bool) -> Result<Vec<ReadMetrics>, NanogetError> {
-    // CRAM processing would be similar to BAM but with rust-htslib's CRAM support
-    // For now, we'll use the same logic as BAM
     process_bam(file, keep_supplementary)
 }
 

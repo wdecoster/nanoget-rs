@@ -17,7 +17,12 @@ fn main() -> Result<(), NanogetError> {
 
     match cli.command {
         Commands::Extract(args) => {
-            let metrics = extract::extract_metrics(&args)?;
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(args.threads)
+                .build()
+                .map_err(|e| NanogetError::ProcessingError(e.to_string()))?;
+
+            let metrics = pool.install(|| extract::extract_metrics(&args))?;
 
             // Generate output based on format
             let output = match args.output_format.as_str() {

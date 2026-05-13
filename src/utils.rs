@@ -1,5 +1,20 @@
 use crate::error::NanogetError;
 use std::path::Path;
+use std::sync::OnceLock;
+
+/// Precomputed error probabilities for Phred scores 0–255.
+/// Replaces per-base `powf` calls with a table lookup.
+static PHRED_TO_PROB: OnceLock<[f64; 256]> = OnceLock::new();
+
+fn phred_to_prob_table() -> &'static [f64; 256] {
+    PHRED_TO_PROB.get_or_init(|| {
+        let mut table = [0.0f64; 256];
+        for (i, slot) in table.iter_mut().enumerate() {
+            *slot = 10.0_f64.powf(i as f64 / -10.0);
+        }
+        table
+    })
+}
 
 /// Check if a file exists
 pub fn check_file_exists(path: &Path) -> Result<(), NanogetError> {
@@ -11,37 +26,31 @@ pub fn check_file_exists(path: &Path) -> Result<(), NanogetError> {
     Ok(())
 }
 
-/// Calculate average quality from Phred scores
-/// Converts Phred scores to error probabilities, calculates average, then back to Phred
+/// Calculate average quality from Phred scores.
+/// Uses a precomputed lookup table to avoid per-base `powf` calls.
 pub fn average_quality(qualities: &[u8]) -> Option<f64> {
     if qualities.is_empty() {
         return None;
     }
 
-    // Skip if all values are 255 (missing quality indicator in BAM)
-    if qualities.iter().all(|&q| q == 255) {
+    let table = phred_to_prob_table();
+    let mut error_sum = 0.0f64;
+    let mut n = 0usize;
+
+    for &q in qualities {
+        // 255 is the missing-quality sentinel in BAM; skip those bases
+        if q != 255 {
+            error_sum += table[q as usize];
+            n += 1;
+        }
+    }
+
+    if n == 0 {
         return None;
     }
 
-    // Convert Phred scores to error probabilities
-    let error_sum: f64 = qualities
-        .iter()
-        .map(|&q| 10.0_f64.powf(q as f64 / -10.0))
-        .sum();
-
-    let avg_error = error_sum / qualities.len() as f64;
-
-    // Convert back to Phred score
-    // Handle edge cases: if avg_error is 0 or very small, log10 returns -inf
-    // Clamp to a reasonable maximum quality score (e.g., 60)
-    let result = -10.0 * avg_error.log10();
-    if result.is_nan() || result.is_infinite() || result > 60.0 {
-        Some(60.0) // Cap at Q60 for extremely high quality
-    } else if result < 0.0 {
-        Some(0.0) // Floor at Q0
-    } else {
-        Some(result)
-    }
+    let result = -10.0 * (error_sum / n as f64).log10();
+    Some(result.clamp(0.0, 60.0))
 }
 
 /// Calculate percent identity from CIGAR operations and reference length

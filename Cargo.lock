@@ -1131,6 +1131,7 @@ dependencies = [
  "csv",
  "env_logger",
  "flate2",
+ "libc",
  "log",
  "predicates",
  "rayon",

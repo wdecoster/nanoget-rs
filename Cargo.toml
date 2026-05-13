@@ -49,6 +49,9 @@ env_logger = "0.11"
 # Parallel processing
 rayon = "1.12"
 
+# Low-level OS primitives for stdin reconstruction (pipe/dup)
+libc = "0.2"
+
 # Statistics and math
 statrs = "0.18"
 

@@ -9,6 +9,7 @@ use log::info;
 use rayon::prelude::*;
 use rust_htslib::bam::record::{Aux, Cigar};
 use rust_htslib::bam::Read as BamRead;
+use std::io::Read;
 use std::path::Path;
 
 /// Safely parse a timestamp (seconds since epoch) to DateTime<Utc>
@@ -28,6 +29,11 @@ fn parse_timestamp(timestamp: f64) -> Option<DateTime<Utc>> {
 
 /// Main entry point for extracting metrics from files
 pub fn extract_metrics(args: &ExtractArgs) -> Result<MetricsCollection, NanogetError> {
+    // Stdin shortcut: single "-" path handled entirely here.
+    if args.files.len() == 1 && args.files[0].as_os_str() == "-" {
+        return extract_metrics_stdin(args);
+    }
+
     info!(
         "Starting nanoget extraction with {} files",
         args.files.len()
@@ -74,8 +80,8 @@ fn process_single_file(
         FileType::FastqRich => process_fastq(file, true)?,
         FileType::FastqMinimal => process_fastq_minimal(file)?,
         FileType::Fasta => process_fasta(file)?,
-        FileType::Bam => process_bam(file, args.keep_supplementary)?,
-        FileType::Cram => process_cram(file, args.keep_supplementary)?,
+        FileType::Bam => process_bam(file, args.keep_supplementary, args.threads)?,
+        FileType::Cram => process_bam(file, args.keep_supplementary, args.threads)?,
         FileType::Ubam => process_ubam(file)?,
         FileType::Summary => process_summary(file, &args.read_type, args.barcoded)?,
     };
@@ -85,9 +91,16 @@ fn process_single_file(
 
 /// Process FASTQ files
 fn process_fastq(file: &Path, rich: bool) -> Result<Vec<ReadMetrics>, NanogetError> {
+    let reader = utils::open_file(file)?;
+    process_fastq_from_reader(reader, rich)
+}
+
+fn process_fastq_from_reader<R: Read>(
+    reader: R,
+    rich: bool,
+) -> Result<Vec<ReadMetrics>, NanogetError> {
     use bio::io::fastq;
 
-    let reader = utils::open_file(file)?;
     let fastq_reader = fastq::Reader::new(reader);
     let mut metrics = Vec::new();
 
@@ -104,7 +117,6 @@ fn process_fastq(file: &Path, rich: bool) -> Result<Vec<ReadMetrics>, NanogetErr
             read_metrics = read_metrics.with_quality(q);
         }
 
-        // For rich FASTQ, try to extract additional metadata from the description
         if rich {
             let desc = record.desc().unwrap_or("");
             if let Some(metadata) = parse_rich_fastq_metadata(desc) {
@@ -120,15 +132,10 @@ fn process_fastq(file: &Path, rich: bool) -> Result<Vec<ReadMetrics>, NanogetErr
         metrics.push(read_metrics);
 
         if i % 10000 == 0 && i > 0 {
-            info!("Processed {} reads from {}", i, file.display());
+            info!("Processed {} reads", i);
         }
     }
 
-    info!(
-        "Finished processing {} reads from {}",
-        metrics.len(),
-        file.display()
-    );
     Ok(metrics)
 }
 
@@ -142,11 +149,7 @@ fn process_fastq_minimal(file: &Path) -> Result<Vec<ReadMetrics>, NanogetError> 
 
     for result in fastq_reader.records() {
         let record = result.map_err(|e| NanogetError::ParseError(e.to_string()))?;
-
-        let length = record.seq().len() as u32;
-        let read_metrics = ReadMetrics::new(None, length); // No read ID for minimal processing
-
-        metrics.push(read_metrics);
+        metrics.push(ReadMetrics::new(None, record.seq().len() as u32));
     }
 
     Ok(metrics)
@@ -154,20 +157,22 @@ fn process_fastq_minimal(file: &Path) -> Result<Vec<ReadMetrics>, NanogetError> 
 
 /// Process FASTA files
 fn process_fasta(file: &Path) -> Result<Vec<ReadMetrics>, NanogetError> {
+    let reader = utils::open_file(file)?;
+    process_fasta_from_reader(reader)
+}
+
+fn process_fasta_from_reader<R: Read>(reader: R) -> Result<Vec<ReadMetrics>, NanogetError> {
     use bio::io::fasta;
 
-    let reader = utils::open_file(file)?;
     let fasta_reader = fasta::Reader::new(reader);
     let mut metrics = Vec::new();
 
     for result in fasta_reader.records() {
         let record = result.map_err(|e| NanogetError::ParseError(e.to_string()))?;
-
-        let read_id = record.id().to_string();
-        let length = record.seq().len() as u32;
-
-        let read_metrics = ReadMetrics::new(Some(read_id), length);
-        metrics.push(read_metrics);
+        metrics.push(ReadMetrics::new(
+            Some(record.id().to_string()),
+            record.seq().len() as u32,
+        ));
     }
 
     Ok(metrics)
@@ -201,18 +206,28 @@ fn get_de_tag(record: &rust_htslib::bam::Record) -> Option<f64> {
     }
 }
 
-/// Calculate gap-compressed identity from CIGAR and NM tag
-/// Based on https://lh3.github.io/2018/11/25/on-the-definition-of-sequence-identity
-/// Recent minimap2 versions provide this as the 'de' tag
-fn gap_compressed_identity(record: &rust_htslib::bam::Record) -> Option<f64> {
-    // First try to get the de tag (from minimap2)
+/// Extract aligned length and gap-compressed identity with at most one CIGAR pass.
+///
+/// When the minimap2 `de` tag is present: one minimal CIGAR pass for aligned length only.
+/// When absent: one combined CIGAR pass computing both values simultaneously.
+fn alignment_stats(record: &rust_htslib::bam::Record) -> (u32, Option<f64>) {
+    let mut aligned_len: u32 = 0;
+
     if let Some(identity) = get_de_tag(record) {
-        return Some(identity);
+        // Minimal pass: aligned length only, no identity bookkeeping needed
+        for entry in record.cigar().iter() {
+            match entry {
+                Cigar::Match(len) | Cigar::Equal(len) | Cigar::Diff(len) | Cigar::Ins(len) => {
+                    aligned_len += len;
+                }
+                _ => {}
+            }
+        }
+        return (aligned_len, Some(identity));
     }
 
-    // Otherwise calculate from CIGAR and NM
-    let nm = get_nm_tag(record)?;
-
+    // No de tag: compute both in one pass
+    let nm = get_nm_tag(record);
     let mut matches: u32 = 0;
     let mut gap_size: u32 = 0;
     let mut gap_count: u32 = 0;
@@ -220,9 +235,15 @@ fn gap_compressed_identity(record: &rust_htslib::bam::Record) -> Option<f64> {
     for entry in record.cigar().iter() {
         match entry {
             Cigar::Match(len) | Cigar::Equal(len) | Cigar::Diff(len) => {
+                aligned_len += len;
                 matches += len;
             }
-            Cigar::Del(len) | Cigar::Ins(len) => {
+            Cigar::Ins(len) => {
+                aligned_len += len;
+                gap_size += len;
+                gap_count += 1;
+            }
+            Cigar::Del(len) => {
                 gap_size += len;
                 gap_count += 1;
             }
@@ -230,96 +251,45 @@ fn gap_compressed_identity(record: &rust_htslib::bam::Record) -> Option<f64> {
         }
     }
 
-    // Avoid division by zero
-    let denominator = matches + gap_count;
-    if denominator == 0 {
-        return None;
-    }
-
-    // Calculate gap-compressed identity
-    // Formula: 100 * (1 - (NM - gap_size + gap_count) / (matches + gap_count))
-    let numerator = nm.saturating_sub(gap_size) + gap_count;
-    Some(100.0 * (1.0 - (numerator as f64 / denominator as f64)))
-}
-
-/// Calculate aligned length from CIGAR (consuming reference bases)
-fn calculate_aligned_length(record: &rust_htslib::bam::Record) -> u32 {
-    let mut aligned_len: u32 = 0;
-    for entry in record.cigar().iter() {
-        match entry {
-            // Operations that consume query sequence
-            Cigar::Match(len) | Cigar::Equal(len) | Cigar::Diff(len) | Cigar::Ins(len) => {
-                aligned_len += len;
-            }
-            // Soft clips are part of the query but not aligned
-            Cigar::SoftClip(_) => {}
-            // Hard clips, deletions, ref skips don't consume query
-            _ => {}
+    let identity = nm.and_then(|nm| {
+        let denominator = matches + gap_count;
+        if denominator == 0 {
+            return None;
         }
-    }
-    aligned_len
+        let numerator = nm.saturating_sub(gap_size) + gap_count;
+        Some(100.0 * (1.0 - (numerator as f64 / denominator as f64)))
+    });
+
+    (aligned_len, identity)
 }
 
-/// Process BAM or CRAM files.
-/// Attempts parallel chromosome-level processing via an index (.bai/.crai);
-/// falls back to sequential streaming when no index is present.
-fn process_bam(file: &Path, keep_supplementary: bool) -> Result<Vec<ReadMetrics>, NanogetError> {
-    use rust_htslib::bam;
-
-    match bam::IndexedReader::from_path(file) {
-        Ok(indexed) => process_bam_parallel(file, keep_supplementary, indexed),
-        Err(_) => {
-            info!(
-                "No index found for {}, falling back to sequential read",
-                file.display()
-            );
-            process_bam_sequential(file, keep_supplementary)
-        }
-    }
-}
-
-/// Parallel path: one rayon task per chromosome/contig, each with its own reader.
-fn process_bam_parallel(
+/// Process BAM or CRAM files using sequential streaming with BGZF multi-threading.
+///
+/// htslib's BGZF threading pre-decompresses blocks on background threads while the
+/// main thread processes records — much faster than chromosome-level parallelism,
+/// which forces random seeks that break sequential BGZF streaming.
+fn process_bam(
     file: &Path,
     keep_supplementary: bool,
-    reader: rust_htslib::bam::IndexedReader,
+    threads: usize,
 ) -> Result<Vec<ReadMetrics>, NanogetError> {
-
-    let n_targets = reader.header().target_count();
-    if n_targets == 0 {
-        return process_bam_sequential(file, keep_supplementary);
+    let mut reader = if file.as_os_str() == "-" {
+        rust_htslib::bam::Reader::from_stdin()?
+    } else {
+        rust_htslib::bam::Reader::from_path(file)?
+    };
+    // Use all-but-one thread for BGZF decompression; htslib manages the pool.
+    let bgzf_threads = threads.saturating_sub(1);
+    if bgzf_threads > 0 {
+        reader
+            .set_threads(bgzf_threads)
+            .map_err(|e| NanogetError::ProcessingError(e.to_string()))?;
     }
-
     info!(
-        "Processing {} using index across {} contigs",
+        "Processing {} with {} BGZF threads",
         file.display(),
-        n_targets
+        bgzf_threads
     );
-
-    let file = file.to_path_buf();
-
-    let chunk_results: Vec<Result<Vec<ReadMetrics>, NanogetError>> = (0..n_targets)
-        .into_par_iter()
-        .map(|tid| {
-            let mut r = rust_htslib::bam::IndexedReader::from_path(&file)?;
-            r.fetch(tid)?;
-            extract_bam_records(&mut r, keep_supplementary)
-        })
-        .collect();
-
-    let mut metrics = Vec::new();
-    for result in chunk_results {
-        metrics.extend(result?);
-    }
-    Ok(metrics)
-}
-
-/// Sequential fallback: streams all records from a plain Reader.
-fn process_bam_sequential(
-    file: &Path,
-    keep_supplementary: bool,
-) -> Result<Vec<ReadMetrics>, NanogetError> {
-    let mut reader = rust_htslib::bam::Reader::from_path(file)?;
     extract_bam_records(&mut reader, keep_supplementary)
 }
 
@@ -342,14 +312,13 @@ fn extract_bam_records<R: BamRead>(
 
         let read_id = String::from_utf8_lossy(record.qname()).to_string();
         let length = record.seq().len() as u32;
-        let aligned_length = calculate_aligned_length(&record);
+        let (aligned_length, percent_identity) = alignment_stats(&record);
         let mapping_quality = if record.mapq() == 255 {
             None
         } else {
             Some(record.mapq())
         };
         let quality = utils::average_quality(record.qual());
-        let percent_identity = gap_compressed_identity(&record);
 
         metrics.push(
             ReadMetrics::new(Some(read_id), length)
@@ -361,16 +330,15 @@ fn extract_bam_records<R: BamRead>(
     Ok(metrics)
 }
 
-/// Process CRAM files — same index-then-fallback logic as BAM.
-fn process_cram(file: &Path, keep_supplementary: bool) -> Result<Vec<ReadMetrics>, NanogetError> {
-    process_bam(file, keep_supplementary)
-}
-
 /// Process unaligned BAM files
 fn process_ubam(file: &Path) -> Result<Vec<ReadMetrics>, NanogetError> {
     use rust_htslib::{bam, bam::Read};
 
-    let mut bam_reader = bam::Reader::from_path(file)?;
+    let mut bam_reader = if file.as_os_str() == "-" {
+        bam::Reader::from_stdin()?
+    } else {
+        bam::Reader::from_path(file)?
+    };
     let mut metrics = Vec::new();
 
     for result in bam_reader.records() {
@@ -404,10 +372,18 @@ fn process_summary(
     read_type: &str,
     barcoded: bool,
 ) -> Result<Vec<ReadMetrics>, NanogetError> {
+    let reader = utils::open_file(file)?;
+    process_summary_from_reader(reader, read_type, barcoded)
+}
+
+fn process_summary_from_reader<R: Read>(
+    reader: R,
+    read_type: &str,
+    barcoded: bool,
+) -> Result<Vec<ReadMetrics>, NanogetError> {
     use csv::ReaderBuilder;
     use std::collections::HashMap;
 
-    let reader = utils::open_file(file)?;
     let mut csv_reader = ReaderBuilder::new().delimiter(b'\t').from_reader(reader);
 
     // Get headers
@@ -467,6 +443,138 @@ fn process_summary(
     }
 
     Ok(metrics)
+}
+
+/// Read from stdin: peek with fill_buf() to detect format, then route to the appropriate parser.
+///
+/// For text formats (FASTQ, FASTA, summary TSV): the BufReader is passed directly to the parser.
+/// `fill_buf()` does not advance the BufReader's read position, so no bytes are lost.
+///
+/// For binary formats (BAM/CRAM): htslib reads from OS fd 0 directly, bypassing the BufReader.
+/// We reconstruct stdin at the OS level by prepending the peeked bytes via a pipe + background thread.
+fn extract_metrics_stdin(args: &ExtractArgs) -> Result<MetricsCollection, NanogetError> {
+    use std::io::BufRead;
+
+    let mut stdin_reader = std::io::BufReader::new(std::io::stdin());
+
+    // Peek without consuming (BufReader internal buffer is filled, read position stays at 0).
+    let file_type = {
+        let peek = stdin_reader
+            .fill_buf()
+            .map_err(|e| NanogetError::ParseError(format!("Failed to read stdin: {}", e)))?;
+        FileType::sniff_stdin_bytes(peek)?
+    };
+
+    info!("Detected stdin format: {:?}", file_type);
+
+    let reads = match &file_type {
+        FileType::Bam | FileType::Cram | FileType::Ubam => {
+            // htslib reads from OS fd 0 directly, bypassing the BufReader.
+            // Extract the peeked bytes and reconstruct fd 0 via a pipe so htslib
+            // sees a complete, untruncated stream.
+            let sniffed = stdin_reader.buffer().to_vec();
+            drop(stdin_reader);
+            reconstruct_stdin_prefix(sniffed)?;
+            match file_type {
+                FileType::Ubam => process_ubam(Path::new("-"))?,
+                _ => process_bam(Path::new("-"), args.keep_supplementary, args.threads)?,
+            }
+        }
+        _ => {
+            // Text formats (FASTQ, FASTA, summary TSV) — may be gzip-compressed.
+            // The BufReader still has all peeked bytes at position 0, so we can wrap
+            // it in a GzDecoder if the stream is gzip-encoded.
+            let is_plain_gzip = {
+                let buf = stdin_reader.buffer();
+                buf.len() >= 2
+                    && buf[0] == 0x1f
+                    && buf[1] == 0x8b
+                    && !(buf.len() >= 16
+                        && buf[3] & 0x04 != 0
+                        && buf[12..16] == [0x42, 0x43, 0x02, 0x00])
+            };
+            let reader: Box<dyn Read> = if is_plain_gzip {
+                Box::new(flate2::bufread::GzDecoder::new(stdin_reader))
+            } else {
+                Box::new(stdin_reader)
+            };
+            match file_type {
+                FileType::Fastq | FileType::FastqRich => process_fastq_from_reader(reader, false)?,
+                FileType::Fasta => process_fasta_from_reader(reader)?,
+                FileType::Summary => {
+                    process_summary_from_reader(reader, &args.read_type, args.barcoded)?
+                }
+                other => {
+                    return Err(NanogetError::ParseError(format!(
+                        "Format {:?} is not supported for stdin input",
+                        other
+                    )))
+                }
+            }
+        }
+    };
+
+    Ok(MetricsCollection::new(reads))
+}
+
+/// Prepend `prefix` bytes to stdin by replacing fd 0 with a pipe whose write end is fed by a
+/// background thread (prefix bytes first, then the rest of the original stdin).
+///
+/// This allows htslib — which reads from fd 0 directly — to see a complete, untruncated stream
+/// even after we have consumed `prefix.len()` bytes from the OS stdin for format detection.
+#[cfg(unix)]
+fn reconstruct_stdin_prefix(prefix: Vec<u8>) -> Result<(), NanogetError> {
+    use std::os::unix::io::FromRawFd;
+
+    unsafe {
+        // Save a dup of the current stdin before we replace it.
+        let saved_stdin = libc::dup(0);
+        if saved_stdin < 0 {
+            return Err(NanogetError::ProcessingError(
+                "Failed to dup stdin fd".into(),
+            ));
+        }
+
+        // Create an anonymous pipe.
+        let mut pipe_fds: [libc::c_int; 2] = [0; 2];
+        if libc::pipe(pipe_fds.as_mut_ptr()) != 0 {
+            libc::close(saved_stdin);
+            return Err(NanogetError::ProcessingError(
+                "Failed to create pipe for stdin reconstruction".into(),
+            ));
+        }
+        let (read_fd, write_fd) = (pipe_fds[0], pipe_fds[1]);
+
+        // Replace stdin (fd 0) with the read end of the pipe.
+        if libc::dup2(read_fd, 0) < 0 {
+            libc::close(read_fd);
+            libc::close(write_fd);
+            libc::close(saved_stdin);
+            return Err(NanogetError::ProcessingError(
+                "Failed to redirect stdin to pipe".into(),
+            ));
+        }
+        libc::close(read_fd); // fd 0 is now the only reference to the read end.
+
+        // Background thread: write prefix, then drain the original stdin into the write end.
+        std::thread::spawn(move || {
+            use std::io::Write;
+            let mut writer = std::fs::File::from_raw_fd(write_fd);
+            let mut orig = std::fs::File::from_raw_fd(saved_stdin);
+            let _ = writer.write_all(&prefix);
+            let _ = std::io::copy(&mut orig, &mut writer);
+            // Both fds are closed when writer/orig drop, signalling EOF to the reader.
+        });
+    }
+
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn reconstruct_stdin_prefix(_prefix: Vec<u8>) -> Result<(), NanogetError> {
+    Err(NanogetError::ProcessingError(
+        "BAM/CRAM from stdin is only supported on Unix".into(),
+    ))
 }
 
 /// Metadata extracted from rich FASTQ descriptions

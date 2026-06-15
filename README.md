@@ -233,6 +233,19 @@ nanoget-rs aims to be functionally equivalent to the original Python nanoget whi
 
 Contributions are welcome! Please feel free to submit issues and enhancement requests.
 
+### Development setup
+
+Install the toolchain components and the git hooks once after cloning:
+
+```bash
+make setup          # adds rustfmt & clippy components (and cargo-audit/outdated)
+make install-hooks  # installs pre-commit and pre-push hooks into .git/hooks
+```
+
+The hooks run `cargo fmt` and `cargo clippy` (and tests on commit) so that
+formatting/lint issues are caught locally before they fail CI. Run the same
+checks manually with `make pre-commit`, `make pre-push`, or `make ci`.
+
 ## License
 
 This project is licensed under the GPL-3.0 License - see the [LICENSE](LICENSE) file for details.

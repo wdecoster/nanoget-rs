@@ -7,9 +7,12 @@ use crate::utils;
 use chrono::{DateTime, TimeZone, Utc};
 use log::info;
 use rayon::prelude::*;
-use rust_htslib::htslib::{hts_fmt_option_CRAM_OPT_REQUIRED_FIELDS, sam_fields_SAM_AUX, sam_fields_SAM_CIGAR, sam_fields_SAM_FLAG, sam_fields_SAM_MAPQ, sam_fields_SAM_QNAME, sam_fields_SAM_SEQ};
 use rust_htslib::bam::record::{Aux, Cigar};
 use rust_htslib::bam::Read as BamRead;
+use rust_htslib::htslib::{
+    hts_fmt_option_CRAM_OPT_REQUIRED_FIELDS, sam_fields_SAM_AUX, sam_fields_SAM_CIGAR,
+    sam_fields_SAM_FLAG, sam_fields_SAM_MAPQ, sam_fields_SAM_QNAME, sam_fields_SAM_SEQ,
+};
 use std::io::Read;
 use std::path::Path;
 
@@ -289,8 +292,8 @@ fn process_bam(
 
     // For CRAM: tell htslib which fields we actually need so it can skip
     // decompressing the quality and mate-pair streams entirely.
-    let is_cram = file.extension().and_then(|e| e.to_str()) == Some("cram")
-        || file.as_os_str() == "-"; // stdin CRAM is handled safely — no-op on BAM
+    let is_cram =
+        file.extension().and_then(|e| e.to_str()) == Some("cram") || file.as_os_str() == "-"; // stdin CRAM is handled safely — no-op on BAM
     if is_cram {
         #[allow(clippy::arithmetic_side_effects)]
         let fields = sam_fields_SAM_QNAME
@@ -338,10 +341,12 @@ fn extract_bam_records<R: BamRead>(
             Some(record.mapq())
         };
 
-        metrics.push(
-            ReadMetrics::new(Some(read_id), length)
-                .with_alignment(aligned_length, None, mapping_quality, percent_identity),
-        );
+        metrics.push(ReadMetrics::new(Some(read_id), length).with_alignment(
+            aligned_length,
+            None,
+            mapping_quality,
+            percent_identity,
+        ));
     }
 
     Ok(metrics)
@@ -648,8 +653,7 @@ fn parse_rich_fastq_metadata(desc: &str) -> Option<RichFastqMetadata> {
         } else {
             // SAM-style format (MinKNOW >= 26.01): tag:type:value
             let mut parts = field.splitn(3, ':');
-            if let (Some(tag), Some(_ty), Some(value)) =
-                (parts.next(), parts.next(), parts.next())
+            if let (Some(tag), Some(_ty), Some(value)) = (parts.next(), parts.next(), parts.next())
             {
                 match tag {
                     "ch" => {

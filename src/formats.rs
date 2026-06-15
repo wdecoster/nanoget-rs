@@ -33,6 +33,8 @@ impl FileType {
     /// 4. `@` first byte → FASTQ
     /// 5. `>` first byte → FASTA
     /// 6. Tab-separated first line with known summary columns → Summary
+    // Public library API (re-exported via `nanoget_rs::FileType`); not yet wired into the binary.
+    #[allow(dead_code)]
     pub fn sniff(path: &Path) -> Result<Self, NanogetError> {
         use std::fs::File;
         use std::io::{Read, Seek, SeekFrom};
@@ -144,6 +146,8 @@ impl FileType {
     }
 
     /// Returns true for aligned formats (BAM/CRAM).
+    // Public library API (re-exported via `nanoget_rs::FileType`); not used by the binary.
+    #[allow(dead_code)]
     pub fn is_aligned(&self) -> bool {
         matches!(self, Self::Bam | Self::Cram)
     }

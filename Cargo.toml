@@ -1,6 +1,6 @@
 [package]
 name = "nanoget-rs"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 authors = ["Wouter De Coster <decosterwouter@gmail.com>"]
 description = "Fast extraction of metrics from Oxford Nanopore sequencing data and alignments"

@@ -7,6 +7,7 @@ use crate::utils;
 use chrono::{DateTime, TimeZone, Utc};
 use log::info;
 use rayon::prelude::*;
+use rust_htslib::htslib::{hts_fmt_option_CRAM_OPT_REQUIRED_FIELDS, sam_fields_SAM_AUX, sam_fields_SAM_CIGAR, sam_fields_SAM_FLAG, sam_fields_SAM_MAPQ, sam_fields_SAM_QNAME, sam_fields_SAM_SEQ};
 use rust_htslib::bam::record::{Aux, Cigar};
 use rust_htslib::bam::Read as BamRead;
 use std::io::Read;
@@ -285,6 +286,24 @@ fn process_bam(
             .set_threads(bgzf_threads)
             .map_err(|e| NanogetError::ProcessingError(e.to_string()))?;
     }
+
+    // For CRAM: tell htslib which fields we actually need so it can skip
+    // decompressing the quality and mate-pair streams entirely.
+    let is_cram = file.extension().and_then(|e| e.to_str()) == Some("cram")
+        || file.as_os_str() == "-"; // stdin CRAM is handled safely — no-op on BAM
+    if is_cram {
+        #[allow(clippy::arithmetic_side_effects)]
+        let fields = sam_fields_SAM_QNAME
+            | sam_fields_SAM_FLAG
+            | sam_fields_SAM_MAPQ
+            | sam_fields_SAM_CIGAR
+            | sam_fields_SAM_SEQ
+            | sam_fields_SAM_AUX;
+        reader
+            .set_cram_options(hts_fmt_option_CRAM_OPT_REQUIRED_FIELDS, fields)
+            .map_err(|e| NanogetError::ProcessingError(e.to_string()))?;
+    }
+
     info!(
         "Processing {} with {} BGZF threads",
         file.display(),
@@ -318,12 +337,10 @@ fn extract_bam_records<R: BamRead>(
         } else {
             Some(record.mapq())
         };
-        let quality = utils::average_quality(record.qual());
 
         metrics.push(
             ReadMetrics::new(Some(read_id), length)
-                .with_quality(quality.unwrap_or(0.0))
-                .with_alignment(aligned_length, quality, mapping_quality, percent_identity),
+                .with_alignment(aligned_length, None, mapping_quality, percent_identity),
         );
     }
 
@@ -586,9 +603,23 @@ struct RichFastqMetadata {
     run_id: Option<String>,
 }
 
-/// Parse metadata from rich FASTQ description lines
+/// Parse a read start time, accepting either an RFC3339 timestamp string
+/// (real ONT output, e.g. "2019-12-23T13:44:31Z" and the SAM-style "st" tag)
+/// or seconds since the Unix epoch as a float.
+fn parse_start_time(value: &str) -> Option<DateTime<Utc>> {
+    if let Ok(dt) = DateTime::parse_from_rfc3339(value) {
+        return Some(dt.with_timezone(&Utc));
+    }
+    value.parse::<f64>().ok().and_then(parse_timestamp)
+}
+
+/// Parse metadata from rich FASTQ description lines.
+///
+/// Supports both the legacy "key=value" format (e.g. "ch=123") and the SAM-style
+/// "tag:type:value" format introduced in MinKNOW 26.01 (e.g. "ch:i:123"), which also
+/// renames fields: start_time -> "st", runid -> "RG" (with the runid as the first
+/// underscore-separated component of the read group).
 fn parse_rich_fastq_metadata(desc: &str) -> Option<RichFastqMetadata> {
-    // Parse key=value pairs from the description
     let mut metadata = RichFastqMetadata {
         channel_id: None,
         start_time: None,
@@ -596,16 +627,15 @@ fn parse_rich_fastq_metadata(desc: &str) -> Option<RichFastqMetadata> {
         run_id: None,
     };
 
-    for pair in desc.split_whitespace() {
-        if let Some((key, value)) = pair.split_once('=') {
+    for field in desc.split_whitespace() {
+        if let Some((key, value)) = field.split_once('=') {
+            // Legacy albacore/MinKNOW format: key=value
             match key {
                 "ch" => {
                     metadata.channel_id = value.parse().ok();
                 }
                 "start_time" => {
-                    if let Ok(timestamp) = value.parse::<f64>() {
-                        metadata.start_time = parse_timestamp(timestamp);
-                    }
+                    metadata.start_time = parse_start_time(value);
                 }
                 "duration" => {
                     metadata.duration = value.parse().ok();
@@ -614,6 +644,30 @@ fn parse_rich_fastq_metadata(desc: &str) -> Option<RichFastqMetadata> {
                     metadata.run_id = Some(value.to_string());
                 }
                 _ => {} // Ignore unknown keys
+            }
+        } else {
+            // SAM-style format (MinKNOW >= 26.01): tag:type:value
+            let mut parts = field.splitn(3, ':');
+            if let (Some(tag), Some(_ty), Some(value)) =
+                (parts.next(), parts.next(), parts.next())
+            {
+                match tag {
+                    "ch" => {
+                        metadata.channel_id = value.parse().ok();
+                    }
+                    "st" => {
+                        metadata.start_time = parse_start_time(value);
+                    }
+                    "du" => {
+                        metadata.duration = value.parse().ok();
+                    }
+                    "RG" => {
+                        // RG holds "<runid>_<model>@<version>_<barcode>"
+                        let runid = value.split('_').next().unwrap_or(value);
+                        metadata.run_id = Some(runid.to_string());
+                    }
+                    _ => {} // Ignore unknown tags
+                }
             }
         }
     }
@@ -642,5 +696,31 @@ mod tests {
         assert_eq!(metadata.channel_id, Some(100));
         assert_eq!(metadata.duration, Some(2.5));
         assert_eq!(metadata.run_id, Some("test_run".to_string()));
+    }
+
+    #[test]
+    fn test_rich_fastq_metadata_legacy_rfc3339_start_time() {
+        let desc = "runid=ff83cfa read=19343 ch=53 start_time=2019-12-23T13:44:31Z";
+        let metadata = parse_rich_fastq_metadata(desc).unwrap();
+
+        assert_eq!(metadata.channel_id, Some(53));
+        assert_eq!(metadata.run_id, Some("ff83cfa".to_string()));
+        assert!(metadata.start_time.is_some());
+    }
+
+    #[test]
+    fn test_rich_fastq_metadata_sam_format() {
+        // MinKNOW >= 26.01 SAM-style "tag:type:value" header
+        let desc = "ch:i:123 du:f:1.23 st:Z:2025-01-06T10:06:36.778368+00:00 \
+                    RG:Z:e4994c62-93f9-439a-bc8f-d20c95a137a5_rna004_130bps_fast@v5.1.0_barcode02";
+        let metadata = parse_rich_fastq_metadata(desc).unwrap();
+
+        assert_eq!(metadata.channel_id, Some(123));
+        assert_eq!(metadata.duration, Some(1.23));
+        assert_eq!(
+            metadata.run_id,
+            Some("e4994c62-93f9-439a-bc8f-d20c95a137a5".to_string())
+        );
+        assert!(metadata.start_time.is_some());
     }
 }

@@ -248,7 +248,10 @@ impl FileType {
 
 /// Extract the first line from a byte buffer and test it for rich-FASTQ metadata.
 fn first_line_looks_rich(bytes: &[u8]) -> bool {
-    let end = bytes.iter().position(|&b| b == b'\n').unwrap_or(bytes.len());
+    let end = bytes
+        .iter()
+        .position(|&b| b == b'\n')
+        .unwrap_or(bytes.len());
     header_looks_rich(&String::from_utf8_lossy(&bytes[..end]))
 }
 
@@ -301,7 +304,9 @@ mod tests {
         ));
         assert!(header_looks_rich("@read1 ch=42"));
         // SAM-style tag:type:value (MinKNOW >= 26.01)
-        assert!(header_looks_rich("@read1 st:Z:2026-01-01T00:00:00Z ch:i:42"));
+        assert!(header_looks_rich(
+            "@read1 st:Z:2026-01-01T00:00:00Z ch:i:42"
+        ));
         assert!(header_looks_rich("@read1 RG:Z:runid_model@v_barcode"));
         // Plain headers must not be mistaken for rich
         assert!(!header_looks_rich("@read1"));

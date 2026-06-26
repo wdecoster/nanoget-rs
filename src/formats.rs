@@ -77,8 +77,17 @@ impl FileType {
             });
         }
 
-        // FASTQ: records start with '@'
+        // FASTQ: records start with '@'. Peek the first header line to tell a
+        // rich (MinKNOW/albacore metadata) FASTQ apart from a plain one.
         if magic[0] == b'@' {
+            f.seek(SeekFrom::Start(0)).map_err(|e| {
+                NanogetError::ParseError(format!("Seek error on {}: {}", path.display(), e))
+            })?;
+            let mut buf = [0u8; 1024];
+            let bn = f.read(&mut buf).unwrap_or(0);
+            if first_line_looks_rich(&buf[..bn]) {
+                return Ok(Self::FastqRich);
+            }
             return Ok(Self::Fastq);
         }
 
@@ -174,21 +183,45 @@ impl FileType {
             {
                 return Ok(Self::Bam);
             }
-            // Plain gzip (FASTQ or FASTA): decompress the first byte from the peeked buffer.
+            // Plain gzip (FASTQ or FASTA): decompress the first line from the
+            // peeked buffer to reveal the inner format (and, for FASTQ, whether
+            // the header carries rich metadata).
             let mut gz = flate2::read::GzDecoder::new(bytes);
-            let mut first = [0u8; 1];
-            gz.read_exact(&mut first).map_err(|e| {
-                NanogetError::ParseError(format!("Failed to decompress gzip stdin: {}", e))
-            })?;
-            return match first[0] {
-                b'@' => Ok(Self::Fastq),
-                b'>' => Ok(Self::Fasta),
+            let mut head = Vec::new();
+            let mut chunk = [0u8; 256];
+            loop {
+                match gz.read(&mut chunk) {
+                    Ok(0) => break,
+                    Ok(k) => {
+                        head.extend_from_slice(&chunk[..k]);
+                        if head.contains(&b'\n') || head.len() >= 1024 {
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        return Err(NanogetError::ParseError(format!(
+                            "Failed to decompress gzip stdin: {}",
+                            e
+                        )))
+                    }
+                }
+            }
+            return match head.first() {
+                Some(b'@') => Ok(if first_line_looks_rich(&head) {
+                    Self::FastqRich
+                } else {
+                    Self::Fastq
+                }),
+                Some(b'>') => Ok(Self::Fasta),
                 _ => Err(NanogetError::ParseError(
                     "Gzip stdin does not appear to be FASTQ or FASTA".into(),
                 )),
             };
         }
         if bytes[0] == b'@' {
+            if first_line_looks_rich(bytes) {
+                return Ok(Self::FastqRich);
+            }
             return Ok(Self::Fastq);
         }
         if bytes[0] == b'>' {
@@ -213,6 +246,36 @@ impl FileType {
     }
 }
 
+/// Extract the first line from a byte buffer and test it for rich-FASTQ metadata.
+fn first_line_looks_rich(bytes: &[u8]) -> bool {
+    let end = bytes.iter().position(|&b| b == b'\n').unwrap_or(bytes.len());
+    header_looks_rich(&String::from_utf8_lossy(&bytes[..end]))
+}
+
+/// True when a FASTQ header carries MinKNOW/albacore metadata in its description
+/// — the same `key=value` (legacy) or `tag:type:value` (MinKNOW >= 26.01) fields
+/// the rich-FASTQ reader parses. Used to auto-detect `FastqRich`.
+fn header_looks_rich(header: &str) -> bool {
+    // The description is everything after the read id (the first whitespace).
+    let Some((_id, desc)) = header.split_once(char::is_whitespace) else {
+        return false;
+    };
+    desc.split_whitespace().any(|field| {
+        if let Some((key, _)) = field.split_once('=') {
+            matches!(key, "ch" | "start_time" | "duration" | "runid")
+        } else {
+            let mut parts = field.splitn(3, ':');
+            matches!(
+                (parts.next(), parts.next(), parts.next()),
+                (Some("ch"), Some(_), Some(_))
+                    | (Some("st"), Some(_), Some(_))
+                    | (Some("du"), Some(_), Some(_))
+                    | (Some("RG"), Some(_), Some(_))
+            )
+        }
+    })
+}
+
 /// Open the BAM header to distinguish aligned BAM from unaligned BAM (no @SQ lines).
 fn sniff_bam_or_ubam(path: &Path) -> Result<FileType, NanogetError> {
     use rust_htslib::bam::{self, Read};
@@ -229,6 +292,30 @@ fn sniff_bam_or_ubam(path: &Path) -> Result<FileType, NanogetError> {
 mod tests {
     use super::*;
     use std::path::Path;
+
+    #[test]
+    fn test_header_looks_rich() {
+        // Legacy MinKNOW/albacore key=value
+        assert!(header_looks_rich(
+            "@read1 runid=abc ch=42 start_time=2020-01-01T00:00:00Z"
+        ));
+        assert!(header_looks_rich("@read1 ch=42"));
+        // SAM-style tag:type:value (MinKNOW >= 26.01)
+        assert!(header_looks_rich("@read1 st:Z:2026-01-01T00:00:00Z ch:i:42"));
+        assert!(header_looks_rich("@read1 RG:Z:runid_model@v_barcode"));
+        // Plain headers must not be mistaken for rich
+        assert!(!header_looks_rich("@read1"));
+        assert!(!header_looks_rich("@read1 some free-text description"));
+        assert!(!header_looks_rich("@SRR123.1 1 length=1000"));
+    }
+
+    #[test]
+    fn test_first_line_looks_rich() {
+        let rich = b"@read1 ch=42 start_time=2020-01-01T00:00:00Z\nACGT\n+\n!!!!\n";
+        assert!(first_line_looks_rich(rich));
+        let plain = b"@read1\nACGT\n+\n!!!!\n";
+        assert!(!first_line_looks_rich(plain));
+    }
 
     #[test]
     fn test_file_type_detection() {

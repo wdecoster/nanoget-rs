@@ -525,7 +525,8 @@ fn extract_metrics_stdin(args: &ExtractArgs) -> Result<MetricsCollection, Nanoge
                 Box::new(stdin_reader)
             };
             match file_type {
-                FileType::Fastq | FileType::FastqRich => process_fastq_from_reader(reader, false)?,
+                FileType::Fastq => process_fastq_from_reader(reader, false)?,
+                FileType::FastqRich => process_fastq_from_reader(reader, true)?,
                 FileType::Fasta => process_fasta_from_reader(reader)?,
                 FileType::Summary => {
                     process_summary_from_reader(reader, &args.read_type, args.barcoded)?

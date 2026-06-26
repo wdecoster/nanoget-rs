@@ -325,9 +325,13 @@ fn extract_bam_records<R: BamRead>(
     for result in reader.records() {
         let record = result?;
 
-        if record.is_unmapped() {
+        // Secondary alignments are always excluded: they carry no full read
+        // sequence (SEQ is '*' or hard-clipped) and would double-count reads.
+        if record.is_unmapped() || record.is_secondary() {
             continue;
         }
+        // Supplementary alignments are hard-clipped fragments of a read; including
+        // them inflates read counts and yield, so they are excluded unless asked for.
         if !keep_supplementary && record.is_supplementary() {
             continue;
         }

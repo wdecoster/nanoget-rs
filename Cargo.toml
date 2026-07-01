@@ -29,7 +29,7 @@ bzip2 = "0.6"
 rust-htslib = "1.0"
 
 # FASTQ/FASTA parsing
-bio = "3.0"
+bio = "4.0"
 
 # CSV/TSV parsing for summary files
 csv = "1.4"

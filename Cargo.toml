@@ -53,7 +53,7 @@ rayon = "1.12"
 libc = "0.2"
 
 # Statistics and math
-statrs = "0.18"
+statrs = "0.19"
 
 # DateTime handling
 chrono = { version = "0.4", features = ["serde"] }

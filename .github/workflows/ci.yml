@@ -96,11 +96,13 @@ jobs:
     
     - name: Install Rust
       uses: dtolnay/rust-toolchain@stable
-      with:
-        components: rustfmt, clippy
-    
-    - name: Install cargo-audit
-      run: cargo install cargo-audit
-    
-    - name: Run security audit
-      run: cargo audit
+
+    # cargo-deny's advisories check covers vulnerabilities, unsound, yanked, and
+    # unmaintained advisories. Policy (allowed licenses, ignored advisories,
+    # unmaintained = "workspace") lives in deny.toml so it is reviewable in one
+    # place instead of scattered inline flags, and unmaintained transitive
+    # advisories no longer fail every PR.
+    - name: Install and run cargo-deny
+      run: |
+        cargo install cargo-deny --version "0.19.7" --locked
+        cargo deny check

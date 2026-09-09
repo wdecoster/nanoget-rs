@@ -18,7 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Both CLI binary and library API
 - GitHub Actions CI/CD pipeline
 - Automated releases on tag push
-- Cross-platform binary builds (Linux, macOS, Windows)
+- Cross-platform binary builds (Linux gnu, Linux musl static, macOS arm64)
 - Documentation and examples
 
 ### Changed
@@ -85,6 +85,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `channel_distribution` and `barcode_distribution` are `BTreeMap` rather than `HashMap`,
   so JSON output is byte-identical between runs and channels are numerically sorted.
   Previously `HashMap`'s randomised iteration order made output undiffable.
+- The release workflow is rebuilt. It had never run successfully: it declared no
+  `permissions`, so the token was read-only; it built without `--target` but looked for
+  the binary under `target/<target>/`, so four of its five matrix entries could not have
+  found their output; it targeted Windows, which htslib does not support; and it used
+  `actions/create-release` and `actions/upload-release-asset`, both archived since 2021.
+  It now builds Linux gnu, static Linux musl and macOS arm64, and takes its release notes
+  from this file.
 - The binary now links the library instead of re-declaring every module as a private tree,
   which removed all 14 `#[allow(dead_code)]` attributes and halves what it compiles.
 - Test fixtures from [nanotest](https://github.com/wdecoster/nanotest) are included as a

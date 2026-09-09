@@ -15,6 +15,9 @@ exclude = [
     "test_data.fastq",
     "example_library_usage.rs",
     "simple_example.rs",
+    # Test fixtures, pulled in as a git submodule. ~36 MB, and of no use to consumers.
+    "nanotest/",
+    "REVIEW-2026-09-09.md",
 ]
 
 [dependencies]

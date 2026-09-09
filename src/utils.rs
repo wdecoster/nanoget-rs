@@ -16,6 +16,9 @@ fn phred_to_prob_table() -> &'static [f64; 256] {
     })
 }
 
+/// ASCII offset applied to Phred scores in FASTQ quality lines.
+const PHRED33_OFFSET: u8 = 33;
+
 /// Check if a file exists
 pub fn check_file_exists(path: &Path) -> Result<(), NanogetError> {
     if !path.exists() {
@@ -53,8 +56,37 @@ pub fn average_quality(qualities: &[u8]) -> Option<f64> {
     Some(result.clamp(0.0, 60.0))
 }
 
+/// Calculate average quality from an ASCII-encoded FASTQ quality line (Phred+33).
+///
+/// `bio`'s FASTQ reader hands back the raw quality line rather than decoded scores,
+/// so the ASCII offset of 33 has to be removed before the bytes mean anything as
+/// Phred values. Bytes below the `!` offset are not valid Phred+33 characters and
+/// are skipped rather than wrapped into implausibly high scores.
+pub fn average_quality_phred33(ascii_qualities: &[u8]) -> Option<f64> {
+    if ascii_qualities.is_empty() {
+        return None;
+    }
+
+    let table = phred_to_prob_table();
+    let mut error_sum = 0.0f64;
+    let mut n = 0usize;
+
+    for &c in ascii_qualities {
+        if c >= PHRED33_OFFSET {
+            error_sum += table[(c - PHRED33_OFFSET) as usize];
+            n += 1;
+        }
+    }
+
+    if n == 0 {
+        return None;
+    }
+
+    let result = -10.0 * (error_sum / n as f64).log10();
+    Some(result.clamp(0.0, 60.0))
+}
+
 /// Calculate percent identity from CIGAR operations and reference length
-#[allow(dead_code)]
 pub fn calculate_percent_identity(matches: u32, total_aligned: u32) -> f64 {
     if total_aligned == 0 {
         0.0
@@ -69,7 +101,6 @@ pub enum CompressionType {
     None,
     Gzip,
     Bzip2,
-    #[allow(dead_code)]
     Bgzip,
 }
 
@@ -268,6 +299,47 @@ mod tests {
         // 254 is extremely high quality, should be capped
         let avg_254 = average_quality(&max_before_missing).unwrap();
         assert!(avg_254 <= 60.0);
+    }
+
+    #[test]
+    fn test_average_quality_phred33_decodes_ascii_offset() {
+        // bio hands back the raw FASTQ quality line, so '#'=Q2, '+'=Q10, '5'=Q20.
+        // Before the offset was removed these came back as 35, 43 and 53.
+        for (line, expected) in [
+            (b"##########", 2.0),
+            (b"++++++++++", 10.0),
+            (b"5555555555", 20.0),
+        ] {
+            let avg = average_quality_phred33(line).unwrap();
+            assert!(
+                (avg - expected).abs() < 0.01,
+                "{:?} gave {}, expected {}",
+                std::str::from_utf8(line).unwrap(),
+                avg,
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn test_average_quality_phred33_matches_decoded_equivalent() {
+        // Decoding then averaging must agree with averaging already-decoded scores.
+        let decoded: Vec<u8> = vec![8, 10, 12, 9, 11, 13, 10, 8, 14, 12];
+        let ascii: Vec<u8> = decoded.iter().map(|q| q + 33).collect();
+        let a = average_quality_phred33(&ascii).unwrap();
+        let b = average_quality(&decoded).unwrap();
+        assert!((a - b).abs() < 1e-9, "{} != {}", a, b);
+    }
+
+    #[test]
+    fn test_average_quality_phred33_edge_cases() {
+        assert_eq!(average_quality_phred33(&[]), None);
+        // '!' is Q0, the lowest valid Phred+33 character.
+        let q0 = average_quality_phred33(b"!!!").unwrap();
+        assert!((0.0..1.0).contains(&q0));
+        // Bytes below the offset are not valid Phred+33 and are skipped.
+        assert_eq!(average_quality_phred33(&[0, 10, 32]), None);
+        assert!((average_quality_phred33(&[0, b'5']).unwrap() - 20.0).abs() < 0.01);
     }
 
     #[test]

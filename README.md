@@ -39,61 +39,92 @@ nanoget-rs = { git = "https://github.com/wdecoster/nanoget-rs" }
 
 ### Basic usage
 
-Extract metrics from a FASTQ file:
+The format of each input file is detected from its content, so you normally just point
+nanoget at the files:
+
 ```bash
-nanoget extract -t fastq reads.fastq
+nanoget extract reads.fastq.gz
+nanoget extract alignments.bam
+nanoget extract sequencing_summary.txt
 ```
 
-Extract metrics from a BAM file:
+Detection covers FASTQ (plain and rich), FASTA, BAM, CRAM, unaligned BAM and sequencing
+summaries, through gzip and bzip2 compression, and works on `-` (stdin) too:
+
 ```bash
-nanoget extract -t bam alignments.bam
+samtools view -b aln.sam | nanoget extract -
 ```
 
-Extract metrics from a sequencing summary:
+Because each file is classified on its own content, a mixed set works in one run:
+
 ```bash
-nanoget extract -t summary sequencing_summary.txt
+nanoget extract reads.fastq.gz alignments.bam sequencing_summary.txt
+```
+
+### Overriding detection
+
+`-t` / `--file-type` overrides detection. It is needed only to force a format, or to
+select `fastq-minimal`, which is a processing mode (lengths only, no read ids or
+qualities) rather than a format and so cannot be detected:
+
+```bash
+nanoget extract -t fastq-minimal huge_reads.fastq.gz
 ```
 
 ### Output formats
 
 By default, output is in JSON format. You can also specify TSV:
 ```bash
-nanoget extract -t fastq reads.fastq -f tsv
+nanoget extract reads.fastq -f tsv
 ```
 
 Save output to a file:
 ```bash
-nanoget extract -t fastq reads.fastq -o metrics.json
+nanoget extract reads.fastq -o metrics.json
 ```
 
 ### Processing multiple files
 
 Process multiple files and combine results:
 ```bash
-nanoget extract -t fastq file1.fastq file2.fastq file3.fastq
+nanoget extract file1.fastq file2.fastq file3.fastq
 ```
 
 Track datasets separately:
 ```bash
-nanoget extract -t fastq file1.fastq file2.fastq --combine track --names sample1 sample2
+nanoget extract file1.fastq file2.fastq --combine track --names sample1 sample2
 ```
 
 ### Advanced options
 
 Use multiple threads:
 ```bash
-nanoget extract -t fastq reads.fastq -j 8
+nanoget extract reads.fastq -j 8
 ```
 
-For BAM files, keep supplementary alignments:
+For BAM/CRAM, supplementary alignments are included by default. They are hard-clipped
+fragments of a read, so counting them inflates read counts and yield; exclude them with:
 ```bash
-nanoget extract -t bam alignments.bam --keep-supplementary
+nanoget extract alignments.bam --drop-supplementary
 ```
 
 For summary files, specify read type and barcode analysis:
 ```bash
-nanoget extract -t summary sequencing_summary.txt --read-type 1D --barcoded
+nanoget extract sequencing_summary.txt --read-type 1D --barcoded
 ```
+
+### Strictness
+
+Input that is malformed rather than merely unusual is a hard error, not a warning —
+corrupt FASTQ is common and a plausible-looking wrong answer is worse than a stop:
+
+- a FASTQ record whose sequence and quality lines differ in length, or that has no read id
+- a record in a rich FASTQ carrying no MinKNOW/albacore metadata in its header
+- a sequencing-summary column that is present but holds an unparseable value (a column
+  that is simply absent, or a blank cell, is fine)
+
+Zero-length reads are dropped from all formats, matching python nanoget; the number
+dropped is reported at `info` log level (`RUST_LOG=info`).
 
 ## Library Usage
 
@@ -228,6 +259,64 @@ nanoget-rs aims to be functionally equivalent to the original Python nanoget whi
 - **Lower memory usage** with streaming and optimized data structures
 - **Static typing** for improved reliability
 - **Cross-platform** single binary distribution
+
+### Storage
+
+Metrics are held columnar — one array per field rather than one struct per read. A column
+that an input format never populates is never allocated, which is most of them for any
+given format: a plain FASTQ sets 3 of the 13 fields. Peak memory is 4-9x lower than a row
+layout at the same run time.
+
+```rust
+let metrics = extract_auto(vec!["reads.fastq.gz"])?;
+
+// Borrow a column outright - no copy, no projection.
+let lengths: &[u32] = metrics.reads.lengths();
+
+// Or read row-wise, where that is clearer.
+for read in metrics.iter() {
+    println!("{:?}\t{}", read.read_id(), read.length());
+}
+
+// Filtering selects indices and gathers once.
+let long_reads = metrics.filter_by_length(10_000);
+```
+
+Float metrics are stored — and serialised — as `f32`, which is ample for a Phred score or
+a percent identity. JSON therefore carries about seven significant digits
+(`"quality": 7.69542`); against a `f64` pipeline, values can differ in the seventh. Summary
+statistics are computed in `f64`, though their `min` and `max` are stored values and so
+carry `f32` precision.
+
+### Known differences in output
+
+- **`percent_identity` is gap-compressed, not BLAST-style.** nanoget-rs reports
+  `1 - (NM - gap_bases + gap_count) / (matches + gap_count)`, counting each indel once
+  regardless of its length — the same definition as the minimap2 `de` tag, which is used
+  directly when present. Python nanoget reports BLAST-style identity,
+  `1 - NM / (matches + insertions + deletions)`, charging every base of every indel.
+  Gap-compressed identity is the more meaningful measure for nanopore reads, whose errors
+  are dominated by homopolymer indels, but **the two are not directly comparable**: on the
+  nanotest alignment (1115 reads) nanoget-rs reports a mean of 89.96 and a minimum of
+  73.84 where python nanoget reports 86.35 and 49.09.
+- **`quality` is not reported for aligned BAM/CRAM input.** For aligned reads the percent
+  identity above is the more informative measure, so the Phred quality python nanoget also
+  extracts is deliberately not computed. FASTQ, uBAM and summary input all report quality
+  as usual.
+- **`mapping_quality` is `null` when the BAM records 255** (the "unavailable" sentinel);
+  python nanoget keeps the literal 255 in the distribution.
+
+## Development
+
+The test suite runs against real ONT files from
+[nanotest](https://github.com/wdecoster/nanotest), included as a git submodule:
+
+```bash
+git clone --recurse-submodules https://github.com/wdecoster/nanoget-rs.git
+# or, in an existing clone:
+git submodule update --init --depth 1
+cargo test
+```
 
 ## Contributing
 

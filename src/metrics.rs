@@ -1,7 +1,13 @@
+use crate::cli::CombineMethod;
+use crate::columns::{self, ReadColumns, ReadColumnsBuilder, ReadView};
 use crate::error::NanogetError;
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use serde::ser::{SerializeSeq, SerializeStruct};
+use serde::{Deserialize, Serialize, Serializer};
+use std::collections::BTreeMap;
+use std::fmt;
+use std::io::Write;
+use std::sync::OnceLock;
 
 /// Represents the metrics extracted from a single read
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -24,7 +30,12 @@ pub struct ReadMetrics {
     /// Mapping quality (for aligned reads)
     pub mapping_quality: Option<u8>,
 
-    /// Percent identity to reference (for aligned reads)
+    /// Gap-compressed percent identity to the reference (for aligned reads).
+    ///
+    /// Each indel counts once regardless of length, matching the minimap2 `de` tag.
+    /// Note this is **not** the BLAST-style identity python nanoget reports, so values
+    /// are systematically a few points higher and not directly comparable — see
+    /// `extract::alignment_stats`.
     pub percent_identity: Option<f64>,
 
     /// Channel ID (from sequencing summary or rich FASTQ)
@@ -101,227 +112,374 @@ impl ReadMetrics {
     }
 }
 
-/// Collection of read metrics with summary statistics
-#[derive(Debug, Serialize, Deserialize)]
+/// Collection of read metrics with summary statistics.
+///
+/// Reads are held columnar (see [`ReadColumns`]); `iter()` and `reads.get()` borrow them
+/// back as rows. The serialised *shape* is unchanged — JSON still carries a `reads` array
+/// of per-read objects — though float fields now render at `f32` precision, which is what
+/// the columns hold.
+#[derive(Debug)]
 pub struct MetricsCollection {
-    /// Individual read metrics
-    pub reads: Vec<ReadMetrics>,
+    /// Individual read metrics, one column per field.
+    pub reads: ReadColumns,
 
-    /// Summary statistics
-    pub summary: MetricsSummary,
+    /// Summary statistics, computed on first use.
+    ///
+    /// Not a public field: it is derived from `reads`, so exposing it invited the two
+    /// drifting apart. Computing it lazily also matters — filtering and downsampling go
+    /// through `select`, and a consumer that only ever reads columns was paying for a
+    /// full statistics pass on every intermediate collection.
+    summary: OnceLock<MetricsSummary>,
 }
 
 impl MetricsCollection {
-    /// Create a new collection from a vector of read metrics
-    pub fn new(reads: Vec<ReadMetrics>) -> Self {
-        let summary = MetricsSummary::from_reads(&reads);
-        Self { reads, summary }
+    /// Create a new collection from columns.
+    pub fn new(reads: ReadColumns) -> Self {
+        Self {
+            reads,
+            summary: OnceLock::new(),
+        }
     }
 
-    /// Combine multiple collections
-    pub fn combine(collections: Vec<Self>, method: &str, names: Option<Vec<String>>) -> Self {
-        let mut all_reads = Vec::new();
+    /// Summary statistics over the whole collection, computed on first call and cached.
+    pub fn summary(&self) -> &MetricsSummary {
+        self.summary
+            .get_or_init(|| MetricsSummary::from_columns(&self.reads))
+    }
 
-        match method {
-            "track" => {
-                // Add dataset names to reads
-                for (i, mut collection) in collections.into_iter().enumerate() {
-                    let dataset_name = names
-                        .as_ref()
-                        .and_then(|n| n.get(i))
-                        .cloned()
-                        .unwrap_or_else(|| format!("dataset_{}", i));
+    /// Create a collection from owned rows.
+    ///
+    /// Convenient for tests and for callers holding a `Vec<ReadMetrics>`; the extraction
+    /// path builds columns directly and never materialises the rows.
+    pub fn from_rows(rows: Vec<ReadMetrics>) -> Self {
+        let mut builder = ReadColumnsBuilder::with_capacity(rows.len());
+        for row in rows {
+            builder.push(row);
+        }
+        Self::new(builder.finish())
+    }
 
-                    for read in &mut collection.reads {
-                        read.dataset = Some(dataset_name.clone());
-                    }
-                    all_reads.extend(collection.reads);
-                }
-            }
-            _ => {
-                // Simple concatenation
-                for collection in collections {
-                    all_reads.extend(collection.reads);
-                }
+    /// Number of reads.
+    pub fn len(&self) -> usize {
+        self.reads.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.reads.is_empty()
+    }
+
+    /// Iterate over reads as borrowed rows.
+    pub fn iter(&self) -> impl Iterator<Item = ReadView<'_>> + '_ {
+        self.reads.iter()
+    }
+
+    /// Combine the reads of several datasets into one collection.
+    ///
+    /// Takes the columns rather than whole `MetricsCollection`s so that the summary is
+    /// computed exactly once, over the combined set.
+    pub fn combine(
+        datasets: Vec<ReadColumns>,
+        method: CombineMethod,
+        names: Option<Vec<String>>,
+    ) -> Self {
+        let mut datasets = datasets;
+
+        if matches!(method, CombineMethod::Track) {
+            for (i, columns) in datasets.iter_mut().enumerate() {
+                let name = names
+                    .as_ref()
+                    .and_then(|n| n.get(i))
+                    .cloned()
+                    .unwrap_or_else(|| format!("dataset_{}", i));
+                columns::set_dataset(columns, &name);
             }
         }
 
-        Self::new(all_reads)
+        Self::new(columns::concat(datasets))
     }
 
     /// Get reads from a specific dataset (when using track mode)
-    #[allow(dead_code)]
-    pub fn reads_for_dataset(&self, dataset_name: &str) -> Vec<&ReadMetrics> {
+    pub fn reads_for_dataset(&self, dataset_name: &str) -> Vec<ReadView<'_>> {
         self.reads
             .iter()
-            .filter(|read| read.dataset.as_deref() == Some(dataset_name))
+            .filter(|read| read.dataset() == Some(dataset_name))
             .collect()
     }
 
     /// Get all unique dataset names
-    #[allow(dead_code)]
     pub fn dataset_names(&self) -> Vec<String> {
         let mut names: Vec<String> = self
             .reads
-            .iter()
-            .filter_map(|read| read.dataset.clone())
-            .collect();
+            .datasets()
+            .map(|d| d.values().to_vec())
+            .unwrap_or_default();
         names.sort();
         names.dedup();
         names
     }
 
+    /// Select reads by index, in the order given.
+    ///
+    /// The building block for filtering, downsampling and reordering: decide on indices,
+    /// then gather the columns once.
+    pub fn select(&self, indices: &[usize]) -> MetricsCollection {
+        MetricsCollection::new(self.reads.select(indices))
+    }
+
     /// Filter reads by minimum length
-    #[allow(dead_code)]
     pub fn filter_by_length(&self, min_length: u32) -> MetricsCollection {
-        let filtered_reads: Vec<ReadMetrics> = self
+        let indices: Vec<usize> = self
             .reads
+            .lengths()
             .iter()
-            .filter(|read| read.length >= min_length)
-            .cloned()
+            .enumerate()
+            .filter(|(_, &l)| l >= min_length)
+            .map(|(i, _)| i)
             .collect();
-        MetricsCollection::new(filtered_reads)
+        self.select(&indices)
     }
 
     /// Filter reads by minimum quality
-    #[allow(dead_code)]
     pub fn filter_by_quality(&self, min_quality: f64) -> MetricsCollection {
-        let filtered_reads: Vec<ReadMetrics> = self
+        let indices: Vec<usize> = self
             .reads
             .iter()
-            .filter(|read| read.quality.map(|q| q >= min_quality).unwrap_or(false))
-            .cloned()
+            .filter(|read| read.quality().is_some_and(|q| q >= min_quality))
+            .map(|read| read.index())
             .collect();
-        MetricsCollection::new(filtered_reads)
+        self.select(&indices)
     }
 
     /// Get reads longer than a percentile threshold
-    #[allow(dead_code)]
     pub fn reads_above_length_percentile(&self, percentile: f64) -> MetricsCollection {
-        let mut lengths: Vec<u32> = self.reads.iter().map(|r| r.length).collect();
-        lengths.sort();
+        if self.reads.is_empty() {
+            return MetricsCollection::new(ReadColumns::default());
+        }
 
-        let index = (percentile / 100.0 * (lengths.len() - 1) as f64) as usize;
+        let mut lengths: Vec<u32> = self.reads.lengths().to_vec();
+        lengths.sort_unstable();
+
+        // `lengths` is non-empty, so `len() - 1` cannot underflow. The percentile is
+        // clamped so an out-of-range argument saturates at the ends of the distribution
+        // instead of indexing past it (a NaN percentile casts to index 0).
+        let last = lengths.len() - 1;
+        let index = (percentile.clamp(0.0, 100.0) / 100.0 * last as f64) as usize;
         let threshold = lengths.get(index).copied().unwrap_or(0);
 
         self.filter_by_length(threshold)
     }
 
-    /// Export to JSON string
     /// Export to pretty-printed JSON string
-    #[allow(dead_code)]
     pub fn to_json(&self) -> Result<String, serde_json::Error> {
         serde_json::to_string_pretty(self)
     }
 
     /// Export to compact JSON string
-    #[allow(dead_code)]
     pub fn to_json_compact(&self) -> Result<String, serde_json::Error> {
         serde_json::to_string(self)
     }
 
-    /// Export to TSV format
+    /// Export to TSV format.
+    ///
+    /// Convenience wrapper over [`write_tsv`](Self::write_tsv) that buffers the whole
+    /// output in memory. Prefer `write_tsv` for anything large: this string is roughly
+    /// 190 bytes per read, which for a full sequencing run exceeds the size of the reads
+    /// themselves.
     pub fn to_tsv(&self) -> Result<String, NanogetError> {
-        let mut output = String::new();
+        let mut buf = Vec::new();
+        self.write_tsv(&mut buf)?;
+        String::from_utf8(buf)
+            .map_err(|e| NanogetError::ProcessingError(format!("TSV is not valid UTF-8: {}", e)))
+    }
 
+    /// Write TSV directly to a sink, one read at a time.
+    ///
+    /// Keeps memory independent of the read count: nothing larger than a single row is
+    /// held at once. Pass a [`BufWriter`](std::io::BufWriter) — this issues many small
+    /// writes.
+    pub fn write_tsv<W: Write>(&self, mut writer: W) -> Result<(), NanogetError> {
         // Header row for individual reads
-        output.push_str("read_id\tlength\tquality\taligned_length\taligned_quality\tmapping_quality\tpercent_identity\tchannel_id\tstart_time\tduration\tbarcode\trun_id\tdataset\n");
+        writer.write_all(b"read_id\tlength\tquality\taligned_length\taligned_quality\tmapping_quality\tpercent_identity\tchannel_id\tstart_time\tduration\tbarcode\trun_id\tdataset\n")?;
 
         // Individual read data
-        for read in &self.reads {
-            output.push_str(&format!(
-                "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
-                read.read_id.as_deref().unwrap_or(""),
-                read.length,
-                read.quality
-                    .map(|q| format!("{:.3}", q))
-                    .unwrap_or_default(),
-                read.aligned_length
-                    .map(|l| l.to_string())
-                    .unwrap_or_default(),
-                read.aligned_quality
-                    .map(|q| format!("{:.3}", q))
-                    .unwrap_or_default(),
-                read.mapping_quality
-                    .map(|q| q.to_string())
-                    .unwrap_or_default(),
-                read.percent_identity
-                    .map(|p| format!("{:.3}", p))
-                    .unwrap_or_default(),
-                read.channel_id.map(|c| c.to_string()).unwrap_or_default(),
-                read.start_time.map(|t| t.to_rfc3339()).unwrap_or_default(),
-                read.duration
-                    .map(|d| format!("{:.3}", d))
-                    .unwrap_or_default(),
-                read.barcode.as_deref().unwrap_or(""),
-                read.run_id.as_deref().unwrap_or(""),
-                read.dataset.as_deref().unwrap_or("")
-            ));
+        for read in self.reads.iter() {
+            writeln!(
+                writer,
+                "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                read.read_id().unwrap_or(""),
+                read.length(),
+                OptFixed(read.quality()),
+                OptDisplay(read.aligned_length()),
+                OptFixed(read.aligned_quality()),
+                OptDisplay(read.mapping_quality()),
+                OptFixed(read.percent_identity()),
+                OptDisplay(read.channel_id()),
+                OptRfc3339(read.start_time()),
+                OptFixed(read.duration()),
+                read.barcode().unwrap_or(""),
+                read.run_id().unwrap_or(""),
+                read.dataset().unwrap_or("")
+            )?;
         }
 
         // Add summary statistics as a comment section
-        output.push_str("\n# Summary Statistics\n");
-        output.push_str(&format!("# Total reads: {}\n", self.summary.read_count));
+        writer.write_all(b"\n# Summary Statistics\n")?;
+        let summary = self.summary();
+        writeln!(writer, "# Total reads: {}", summary.read_count)?;
 
-        // Length statistics
-        output.push_str(&format!(
-            "# Length stats - count: {}, mean: {:.2}, median: {:.2}, min: {:.2}, max: {:.2}, std_dev: {:.2}, q25: {:.2}, q75: {:.2}\n",
-            self.summary.length_stats.count,
-            self.summary.length_stats.mean,
-            self.summary.length_stats.median,
-            self.summary.length_stats.min,
-            self.summary.length_stats.max,
-            self.summary.length_stats.std_dev,
-            self.summary.length_stats.q25,
-            self.summary.length_stats.q75
-        ));
-
-        // Quality statistics if available
-        if let Some(quality_stats) = &self.summary.quality_stats {
-            output.push_str(&format!(
-                "# Quality stats - count: {}, mean: {:.2}, median: {:.2}, min: {:.2}, max: {:.2}, std_dev: {:.2}, q25: {:.2}, q75: {:.2}\n",
-                quality_stats.count,
-                quality_stats.mean,
-                quality_stats.median,
-                quality_stats.min,
-                quality_stats.max,
-                quality_stats.std_dev,
-                quality_stats.q25,
-                quality_stats.q75
-            ));
+        write_stats_comment(&mut writer, "Length", &summary.length_stats)?;
+        for (label, stats) in [
+            ("Quality", &summary.quality_stats),
+            ("Mapping quality", &summary.mapping_quality_stats),
+            ("Percent identity", &summary.percent_identity_stats),
+        ] {
+            if let Some(stats) = stats {
+                write_stats_comment(&mut writer, label, stats)?;
+            }
         }
 
-        // Mapping quality statistics if available
-        if let Some(mapping_quality_stats) = &self.summary.mapping_quality_stats {
-            output.push_str(&format!(
-                "# Mapping quality stats - count: {}, mean: {:.2}, median: {:.2}, min: {:.2}, max: {:.2}, std_dev: {:.2}, q25: {:.2}, q75: {:.2}\n",
-                mapping_quality_stats.count,
-                mapping_quality_stats.mean,
-                mapping_quality_stats.median,
-                mapping_quality_stats.min,
-                mapping_quality_stats.max,
-                mapping_quality_stats.std_dev,
-                mapping_quality_stats.q25,
-                mapping_quality_stats.q75
-            ));
-        }
+        Ok(())
+    }
+}
 
-        // Percent identity statistics if available
-        if let Some(percent_identity_stats) = &self.summary.percent_identity_stats {
-            output.push_str(&format!(
-                "# Percent identity stats - count: {}, mean: {:.2}, median: {:.2}, min: {:.2}, max: {:.2}, std_dev: {:.2}, q25: {:.2}, q75: {:.2}\n",
-                percent_identity_stats.count,
-                percent_identity_stats.mean,
-                percent_identity_stats.median,
-                percent_identity_stats.min,
-                percent_identity_stats.max,
-                percent_identity_stats.std_dev,
-                percent_identity_stats.q25,
-                percent_identity_stats.q75
-            ));
-        }
+/// Serialised as `{ "reads": [ {...}, ... ], "summary": {...} }` — the same shape the row
+/// layout produced. Rows are materialised one at a time during serialisation and dropped,
+/// so the columnar saving is not given back here.
+impl Serialize for MetricsCollection {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut state = serializer.serialize_struct("MetricsCollection", 2)?;
+        state.serialize_field("reads", &RowsSerializer(&self.reads))?;
+        state.serialize_field("summary", self.summary())?;
+        state.end()
+    }
+}
 
-        Ok(output)
+struct RowsSerializer<'a>(&'a ReadColumns);
+
+impl Serialize for RowsSerializer<'_> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut seq = serializer.serialize_seq(Some(self.0.len()))?;
+        for view in self.0.iter() {
+            seq.serialize_element(&SerializedRead::from(&view))?;
+        }
+        seq.end()
+    }
+}
+
+/// A read as it goes onto the wire.
+///
+/// Float fields are `f32` here because that is what the columns hold. Serialising the
+/// widened `f64` instead printed the shortest text that round-trips as `f64` — 16-17
+/// digits of which only about 7 carry information, so a quality stored as 7.6954198 came
+/// out as 7.695419788360596 and looked exact to a consumer parsing it at full precision.
+/// The field names and order match `ReadMetrics`, so the JSON shape is unchanged.
+#[derive(Serialize)]
+struct SerializedRead<'a> {
+    read_id: Option<&'a str>,
+    length: u32,
+    quality: Option<f32>,
+    aligned_length: Option<u32>,
+    aligned_quality: Option<f32>,
+    mapping_quality: Option<u8>,
+    percent_identity: Option<f32>,
+    channel_id: Option<u16>,
+    start_time: Option<DateTime<Utc>>,
+    duration: Option<f32>,
+    barcode: Option<&'a str>,
+    run_id: Option<&'a str>,
+    dataset: Option<&'a str>,
+}
+
+impl<'a> From<&ReadView<'a>> for SerializedRead<'a> {
+    fn from(view: &ReadView<'a>) -> Self {
+        Self {
+            read_id: view.read_id(),
+            length: view.length(),
+            quality: view.quality().map(|v| v as f32),
+            aligned_length: view.aligned_length(),
+            aligned_quality: view.aligned_quality().map(|v| v as f32),
+            mapping_quality: view.mapping_quality(),
+            percent_identity: view.percent_identity().map(|v| v as f32),
+            channel_id: view.channel_id(),
+            start_time: view.start_time(),
+            duration: view.duration().map(|v| v as f32),
+            barcode: view.barcode(),
+            run_id: view.run_id(),
+            dataset: view.dataset(),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for MetricsCollection {
+    /// Only the `reads` array is read; the summary is recomputed from it rather than
+    /// trusted, so a document whose `summary` disagrees with its reads (or omits it
+    /// entirely) still loads, and loads consistently.
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        // Reading is not the hot path, so the rows are materialised and then packed.
+        #[derive(Deserialize)]
+        struct Wire {
+            reads: Vec<ReadMetrics>,
+        }
+        let wire = Wire::deserialize(deserializer)?;
+        Ok(MetricsCollection::from_rows(wire.reads))
+    }
+}
+
+/// Write one `# <label> stats - ...` comment line.
+fn write_stats_comment<W: Write>(
+    mut writer: W,
+    label: &str,
+    stats: &StatsSummary,
+) -> Result<(), NanogetError> {
+    writeln!(
+        writer,
+        "# {} stats - count: {}, mean: {:.2}, median: {:.2}, min: {:.2}, max: {:.2}, \
+         std_dev: {:.2}, q25: {:.2}, q75: {:.2}",
+        label,
+        stats.count,
+        stats.mean,
+        stats.median,
+        stats.min,
+        stats.max,
+        stats.std_dev,
+        stats.q25,
+        stats.q75
+    )?;
+    Ok(())
+}
+
+/// `Display` adapters that render an `Option` as either its value or an empty field,
+/// writing straight into the output rather than building a `String` per cell.
+struct OptFixed(Option<f64>);
+struct OptDisplay<T: fmt::Display>(Option<T>);
+struct OptRfc3339(Option<DateTime<Utc>>);
+
+impl fmt::Display for OptFixed {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.0 {
+            Some(v) => write!(f, "{:.3}", v),
+            None => Ok(()),
+        }
+    }
+}
+
+impl<T: fmt::Display> fmt::Display for OptDisplay<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self.0 {
+            Some(v) => write!(f, "{}", v),
+            None => Ok(()),
+        }
+    }
+}
+
+impl fmt::Display for OptRfc3339 {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.0 {
+            // to_rfc3339 allocates; the Display impls chrono offers do not match the
+            // previous output, so this keeps the format byte-identical.
+            Some(t) => write!(f, "{}", t.to_rfc3339()),
+            None => Ok(()),
+        }
     }
 }
 
@@ -343,75 +501,60 @@ pub struct MetricsSummary {
     /// Percent identity statistics (if available)
     pub percent_identity_stats: Option<StatsSummary>,
 
-    /// Channel distribution (if available)
-    pub channel_distribution: Option<HashMap<u16, usize>>,
+    /// Channel distribution (if available).
+    ///
+    /// A `BTreeMap` rather than a `HashMap` so the serialised order is deterministic —
+    /// `HashMap` iteration order is randomised per process, which made two runs over the
+    /// same input produce byte-different JSON. Channels also come out numerically sorted.
+    pub channel_distribution: Option<BTreeMap<u16, usize>>,
 
-    /// Barcode distribution (if available)
-    pub barcode_distribution: Option<HashMap<String, usize>>,
+    /// Barcode distribution (if available). Ordered, for the same reason.
+    pub barcode_distribution: Option<BTreeMap<String, usize>>,
 }
 
 impl MetricsSummary {
-    /// Calculate summary statistics from a collection of reads
-    pub fn from_reads(reads: &[ReadMetrics]) -> Self {
+    /// Calculate summary statistics from columns.
+    ///
+    /// Each statistic reads its column directly. Where a column is absent, or holds no
+    /// finite value, the statistic is `None` rather than a summary of nothing.
+    pub fn from_columns(reads: &ReadColumns) -> Self {
         let read_count = reads.len();
 
-        // Length statistics
-        let lengths: Vec<f64> = reads.iter().map(|r| r.length as f64).collect();
+        let lengths: Vec<f64> = reads.lengths().iter().map(|&l| l as f64).collect();
         let length_stats = StatsSummary::from_values(&lengths);
 
-        // Quality statistics
-        let qualities: Vec<f64> = reads.iter().filter_map(|r| r.quality).collect();
-        let quality_stats = if !qualities.is_empty() {
-            Some(StatsSummary::from_values(&qualities))
-        } else {
-            None
-        };
+        // Non-finite values are skipped alongside absent ones: a NaN is not a
+        // measurement, and letting one through would poison every field of the resulting
+        // StatsSummary, which serialises it as JSON `null` — unreadable by the type's own
+        // Deserialize, since these fields are `f64` and not `Option<f64>`.
+        let quality_stats = stats_from_f32(reads.qualities_raw());
+        let percent_identity_stats = stats_from_f32(reads.percent_identities_raw());
+        let mapping_quality_stats = reads.mapping_qualities_raw().and_then(|column| {
+            let values: Vec<f64> = column
+                .iter()
+                .filter(|&&q| q != 255)
+                .map(|&q| q as f64)
+                .collect();
+            (!values.is_empty()).then(|| StatsSummary::from_values(&values))
+        });
 
-        // Mapping quality statistics
-        let mapping_qualities: Vec<f64> = reads
-            .iter()
-            .filter_map(|r| r.mapping_quality.map(|q| q as f64))
-            .collect();
-        let mapping_quality_stats = if !mapping_qualities.is_empty() {
-            Some(StatsSummary::from_values(&mapping_qualities))
-        } else {
-            None
-        };
-
-        // Percent identity statistics
-        let percent_identities: Vec<f64> =
-            reads.iter().filter_map(|r| r.percent_identity).collect();
-        let percent_identity_stats = if !percent_identities.is_empty() {
-            Some(StatsSummary::from_values(&percent_identities))
-        } else {
-            None
-        };
-
-        // Channel and barcode distribution (combined loop for efficiency)
-        let mut channel_counts: HashMap<u16, usize> = HashMap::new();
-        let mut barcode_counts: HashMap<String, usize> = HashMap::new();
-        for read in reads {
-            if let Some(channel) = read.channel_id {
-                *channel_counts.entry(channel).or_insert(0) += 1;
+        let channel_distribution = reads.channel_ids_raw().and_then(|column| {
+            let mut counts: BTreeMap<u16, usize> = BTreeMap::new();
+            for &channel in column.iter().filter(|&&c| c != 0) {
+                *counts.entry(channel).or_insert(0) += 1;
             }
-            if let Some(barcode) = &read.barcode {
-                // Use entry API efficiently - only clone when inserting new key
-                barcode_counts
-                    .entry(barcode.clone())
-                    .and_modify(|e| *e += 1)
-                    .or_insert(1);
+            (!counts.is_empty()).then_some(counts)
+        });
+
+        let barcode_distribution = reads.barcodes().and_then(|_| {
+            let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+            for read in reads.iter() {
+                if let Some(barcode) = read.barcode() {
+                    *counts.entry(barcode.to_string()).or_insert(0) += 1;
+                }
             }
-        }
-        let channel_distribution = if !channel_counts.is_empty() {
-            Some(channel_counts)
-        } else {
-            None
-        };
-        let barcode_distribution = if !barcode_counts.is_empty() {
-            Some(barcode_counts)
-        } else {
-            None
-        };
+            (!counts.is_empty()).then_some(counts)
+        });
 
         Self {
             read_count,
@@ -425,7 +568,22 @@ impl MetricsSummary {
     }
 }
 
-/// Basic statistical summary for numerical data
+/// Summarise a float column, skipping absent (`NaN`) entries.
+fn stats_from_f32(column: Option<&[f32]>) -> Option<StatsSummary> {
+    let column = column?;
+    let values: Vec<f64> = column
+        .iter()
+        .filter(|v| v.is_finite())
+        .map(|&v| f64::from(v))
+        .collect();
+    (!values.is_empty()).then(|| StatsSummary::from_values(&values))
+}
+
+/// Basic statistical summary for numerical data.
+///
+/// Every field is finite: non-finite inputs are filtered out before the summary is
+/// built. This is what makes the serialised form round-trip — serde_json writes a
+/// non-finite `f64` as `null`, which these non-optional fields cannot read back.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct StatsSummary {
     pub count: usize,
@@ -530,13 +688,121 @@ mod tests {
     }
 
     #[test]
+    fn test_reads_above_length_percentile_on_empty_collection() {
+        // Previously underflowed `lengths.len() - 1` and panicked in debug builds.
+        let empty = MetricsCollection::from_rows(Vec::new());
+        assert_eq!(empty.reads_above_length_percentile(90.0).reads.len(), 0);
+        assert_eq!(empty.reads_above_length_percentile(0.0).reads.len(), 0);
+    }
+
+    #[test]
+    fn test_reads_above_length_percentile_thresholds() {
+        let reads = (1..=5)
+            .map(|i| ReadMetrics::new(Some(format!("r{}", i)), i * 100))
+            .collect();
+        let collection = MetricsCollection::from_rows(reads);
+
+        // Lengths are 100..500; the 50th percentile threshold is 300, keeping 3 reads.
+        assert_eq!(
+            collection.reads_above_length_percentile(50.0).reads.len(),
+            3
+        );
+        assert_eq!(collection.reads_above_length_percentile(0.0).reads.len(), 5);
+        assert_eq!(
+            collection.reads_above_length_percentile(100.0).reads.len(),
+            1
+        );
+
+        // Out-of-range percentiles saturate instead of indexing past the distribution.
+        assert_eq!(
+            collection.reads_above_length_percentile(-10.0).reads.len(),
+            5
+        );
+        assert_eq!(
+            collection.reads_above_length_percentile(150.0).reads.len(),
+            1
+        );
+        assert_eq!(
+            collection
+                .reads_above_length_percentile(f64::NAN)
+                .reads
+                .len(),
+            5
+        );
+    }
+
+    #[test]
+    fn test_non_finite_values_are_excluded_from_summaries() {
+        // ReadMetrics fields are public, so a caller can set a NaN directly. It must not
+        // reach the summary, where it would make every field non-finite.
+        let reads = vec![
+            ReadMetrics::new(Some("ok".into()), 100).with_quality(20.0),
+            ReadMetrics::new(Some("nan".into()), 100).with_quality(f64::NAN),
+            ReadMetrics::new(Some("inf".into()), 100).with_quality(f64::INFINITY),
+        ];
+        let collection = MetricsCollection::from_rows(reads);
+
+        let quality = collection
+            .summary()
+            .quality_stats
+            .as_ref()
+            .expect("quality stats");
+        assert_eq!(
+            quality.count, 1,
+            "only the finite quality should be counted"
+        );
+        assert_eq!(quality.mean, 20.0);
+        for value in [
+            quality.mean,
+            quality.median,
+            quality.min,
+            quality.max,
+            quality.std_dev,
+            quality.q25,
+            quality.q75,
+        ] {
+            assert!(value.is_finite(), "non-finite field: {}", value);
+        }
+    }
+
+    #[test]
+    fn test_summary_is_absent_when_every_value_is_non_finite() {
+        let reads = vec![ReadMetrics::new(Some("nan".into()), 100).with_quality(f64::NAN)];
+        let collection = MetricsCollection::from_rows(reads);
+        assert!(collection.summary().quality_stats.is_none());
+    }
+
+    #[test]
+    fn test_json_output_round_trips() {
+        // serde_json writes a non-finite f64 as `null`, which StatsSummary's non-optional
+        // fields cannot read back — so this only holds because summaries are finite.
+        let reads = vec![
+            ReadMetrics::new(Some("r1".into()), 1000)
+                .with_quality(f64::NAN)
+                .with_alignment(950, None, Some(60), Some(95.5)),
+            ReadMetrics::new(Some("r2".into()), 2000).with_quality(12.5),
+        ];
+        let collection = MetricsCollection::from_rows(reads);
+
+        let json = collection.to_json().expect("serialise");
+        let parsed: MetricsCollection = serde_json::from_str(&json).expect("round-trip");
+
+        assert_eq!(parsed.summary().read_count, collection.summary().read_count);
+        assert_eq!(parsed.reads.len(), 2);
+        assert_eq!(parsed.summary().length_stats.mean, 1500.0);
+        // The per-read NaN still serialises as null, which Option<f64> reads back as None.
+        assert_eq!(parsed.reads.get(0).unwrap().quality(), None);
+        assert_eq!(parsed.reads.get(1).unwrap().quality(), Some(12.5));
+    }
+
+    #[test]
     fn test_tsv_output() {
         let read1 = ReadMetrics::new(Some("read1".to_string()), 1000).with_quality(35.5);
         let read2 = ReadMetrics::new(Some("read2".to_string()), 2000)
             .with_quality(40.0)
             .with_alignment(1900, Some(41.0), Some(60), Some(95.5));
 
-        let metrics = MetricsCollection::new(vec![read1, read2]);
+        let metrics = MetricsCollection::from_rows(vec![read1, read2]);
         let tsv_output = metrics.to_tsv().unwrap();
 
         // Check that it contains the header

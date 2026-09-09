@@ -1,6 +1,8 @@
 // Integration test demonstrating library usage
 
-use nanoget_rs::{convenience::*, MetricsCollection, ReadMetrics};
+use nanoget_rs::{
+    convenience::*, CombineMethod, MetricsCollection, ReadColumnsBuilder, ReadMetrics,
+};
 use std::io::Write;
 use tempfile::NamedTempFile;
 
@@ -15,20 +17,20 @@ fn test_convenience_api() {
     writeln!(temp_file, "@read2").unwrap();
     writeln!(temp_file, "GCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCT").unwrap();
     writeln!(temp_file, "+").unwrap();
-    writeln!(temp_file, "JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ").unwrap();
+    writeln!(temp_file, "JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ").unwrap();
 
     // Test convenience function
     let metrics = extract_from_fastq(temp_file.path()).expect("Failed to extract metrics");
 
-    assert_eq!(metrics.summary.read_count, 2);
+    assert_eq!(metrics.summary().read_count, 2);
     assert_eq!(metrics.reads.len(), 2);
 
     // Test new collection methods
     let high_quality_reads = metrics.filter_by_quality(70.0);
-    assert!(high_quality_reads.summary.read_count <= 2);
+    assert!(high_quality_reads.summary().read_count <= 2);
 
     let long_reads = metrics.filter_by_length(50);
-    assert_eq!(long_reads.summary.read_count, 2); // Both reads are longer than 50bp
+    assert_eq!(long_reads.summary().read_count, 2); // Both reads are longer than 50bp
 
     // Test JSON export
     let json_output = metrics.to_json().expect("Failed to export JSON");
@@ -43,22 +45,24 @@ fn test_convenience_api() {
 
 #[test]
 fn test_dataset_functionality() {
-    // Test the dataset methods even though we can't easily create tracked datasets in this test
-    let reads = vec![
-        ReadMetrics::new(Some("read1".to_string()), 100),
-        ReadMetrics::new(Some("read2".to_string()), 200),
-    ];
+    // Dataset names are assigned by `combine` in track mode; reads are columnar and not
+    // mutated in place.
+    let build = |id: &str, len: u32| {
+        let mut b = ReadColumnsBuilder::new();
+        b.push(ReadMetrics::new(Some(id.to_string()), len));
+        b.finish()
+    };
 
-    let mut collection = MetricsCollection::new(reads);
-
-    // Manually add dataset names to test the functionality
-    collection.reads[0].dataset = Some("Sample1".to_string());
-    collection.reads[1].dataset = Some("Sample2".to_string());
+    let collection = MetricsCollection::combine(
+        vec![build("read1", 100), build("read2", 200)],
+        CombineMethod::Track,
+        Some(vec!["Sample1".to_string(), "Sample2".to_string()]),
+    );
 
     let dataset_names = collection.dataset_names();
     assert_eq!(dataset_names, vec!["Sample1", "Sample2"]);
 
     let sample1_reads = collection.reads_for_dataset("Sample1");
     assert_eq!(sample1_reads.len(), 1);
-    assert_eq!(sample1_reads[0].read_id, Some("read1".to_string()));
+    assert_eq!(sample1_reads[0].read_id(), Some("read1"));
 }

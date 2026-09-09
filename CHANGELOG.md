@@ -9,19 +9,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.2.0] - 2026-09-09
 
-### Added
-- Initial Rust implementation of nanoget
-- Support for FASTQ, FASTA, BAM, CRAM, uBAM, and summary files
-- Parallel processing capabilities
-- Memory-optimized streaming processing
-- Comprehensive test suite
-- Both CLI binary and library API
-- GitHub Actions CI/CD pipeline
-- Automated releases on tag push
-- Cross-platform binary builds (Linux gnu, Linux musl static, macOS arm64)
-- Documentation and examples
+The first published release. 0.1.0 and 0.1.1 existed in `Cargo.toml` but were never
+tagged, so their entries below are recorded for history rather than as shipped versions.
+
+**If you have used this crate before, read the first entry under Fixed.** Every quality
+score it reported from FASTQ input was wrong.
+
+### Fixed
+
+- FASTQ quality scores are now Phred+33 decoded. `bio`'s FASTQ reader returns the raw
+  ASCII quality line, which was being averaged as if it were already Phred, so every
+  FASTQ-derived quality was 33 too high and saturated at the 60 cap. BAM/uBAM/summary
+  input was unaffected.
+- Unaligned BAM piped on stdin is now detected from the SAM header instead of being
+  routed to the aligned extractor, which discarded every record via the unmapped filter
+  and reported zero reads with a success exit code.
+- Extraction from stdin now errors on zero reads, matching the file path.
+- `FileType::sniff` now classifies compressed files by decompressing their head instead
+  of guessing from the extension. Gzipped rich FASTQ was reported as plain FASTQ, losing
+  channel, start time and run id for the common `.fastq.gz` form; bzip2 files and
+  gzipped sequencing summaries were rejected outright. The file and stdin sniffers now
+  share one classifier, so the same bytes classify the same way either way.
+- `MetricsCollection::reads_above_length_percentile` no longer underflows on an empty
+  collection, and clamps out-of-range percentiles instead of indexing past the data.
+- Malformed FASTQ is now a hard error naming the record, the read id and both lengths,
+  instead of being silently accepted and averaged over the shorter of the sequence and
+  quality lines.
+- Zero-length reads are dropped from FASTQ, FASTA, BAM, uBAM and summary input, matching
+  python nanoget; the number dropped is logged at `info` level.
+- A blank `barcode_arrangement` cell in a summary file is treated as absent rather than as
+  a literal empty barcode, consistent with the other optional columns.
+- `channel_id` of 0 is preserved. It had been used as the absent marker, so a summary file
+  carrying a literal 0 silently lost the channel and dropped the read from the channel
+  distribution.
+- The error for a rich FASTQ record with no metadata now names `--file-type fastq` as the
+  way to read a file whose headers are mixed.
 
 ### Changed
+
 - **Breaking (library): metrics are stored columnar.** `MetricsCollection::reads` is a
   `ReadColumns` rather than a `Vec<ReadMetrics>`: one array per field, with a column only
   allocated when an input actually populates it. `ReadMetrics` remains the row type, built
@@ -99,45 +124,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Documented the deliberate output differences from python nanoget in the README:
   gap-compressed rather than BLAST-style `percent_identity`, no `quality` for aligned
   BAM/CRAM, and `null` rather than 255 for an unavailable `mapping_quality`.
+
+## [0.1.1] and [0.1.0] - never released
+
+Recorded for history. Neither version was tagged or published.
+
+### Added
+
+- Initial Rust implementation of nanoget
+- Support for FASTQ, FASTA, BAM, CRAM, uBAM, and summary files
+- Parallel processing capabilities
+- Memory-optimized streaming processing
+- Comprehensive test suite
+- Both CLI binary and library API
+- Feature parity with Python nanoget
+- GitHub Actions CI/CD pipeline
+- Automated releases on tag push
+- Documentation and examples
+
+### Changed
+
 - Complete rewrite from Python to Rust for better performance
 - Enhanced error handling and type safety
 - Improved memory efficiency
 
 ### Fixed
-- FASTQ quality scores are now Phred+33 decoded. `bio`'s FASTQ reader returns the raw
-  ASCII quality line, which was being averaged as if it were already Phred, so every
-  FASTQ-derived quality was 33 too high and saturated at the 60 cap. BAM/uBAM/summary
-  input was unaffected.
-- Unaligned BAM piped on stdin is now detected from the SAM header instead of being
-  routed to the aligned extractor, which discarded every record via the unmapped filter
-  and reported zero reads with a success exit code.
-- Extraction from stdin now errors on zero reads, matching the file path.
-- `FileType::sniff` now classifies compressed files by decompressing their head instead
-  of guessing from the extension. Gzipped rich FASTQ was reported as plain FASTQ, losing
-  channel, start time and run id for the common `.fastq.gz` form; bzip2 files and
-  gzipped sequencing summaries were rejected outright. The file and stdin sniffers now
-  share one classifier, so the same bytes classify the same way either way.
-- `MetricsCollection::reads_above_length_percentile` no longer underflows on an empty
-  collection, and clamps out-of-range percentiles instead of indexing past the data.
-- Malformed FASTQ is now a hard error naming the record, the read id and both lengths,
-  instead of being silently accepted and averaged over the shorter of the sequence and
-  quality lines.
-- Zero-length reads are dropped from FASTQ, FASTA, BAM, uBAM and summary input, matching
-  python nanoget; the number dropped is logged at `info` level.
-- A blank `barcode_arrangement` cell in a summary file is treated as absent rather than as
-  a literal empty barcode, consistent with the other optional columns.
-- `channel_id` of 0 is preserved. It had been used as the absent marker, so a summary file
-  carrying a literal 0 silently lost the channel and dropped the read from the channel
-  distribution.
-- The error for a rich FASTQ record with no metadata now names `--file-type fastq` as the
-  way to read a file whose headers are mixed.
+
 - All compilation warnings resolved
 - Proper error propagation throughout codebase
-
-## [0.1.0] - TBD
-
-### Added
-- Initial release of nanoget-rs
-- Feature parity with Python nanoget
-- Performance improvements through Rust implementation
-- Library API for integration with other Rust tools

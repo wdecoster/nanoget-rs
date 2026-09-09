@@ -140,24 +140,12 @@ jobs:
         asset_name: ${{ env.ASSET }}
         asset_content_type: application/octet-stream
 
-  publish-crate:
-    name: Publish to crates.io
-    needs: ['create-release']
-    runs-on: ubuntu-latest
-    
-    steps:
-    - uses: actions/checkout@v7
-    
-    - name: Install Rust
-      uses: dtolnay/rust-toolchain@stable
-      with:
-        components: rustfmt, clippy
-    
-    - name: Install system dependencies
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y libclang-dev libbz2-dev liblzma-dev zlib1g-dev libcurl4-openssl-dev libssl-dev pkg-config
-    
-    - name: Publish to crates.io
-      run: cargo publish --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
-      continue-on-error: true  # Don't fail if version already exists
+  # Publishing to crates.io is deliberately manual. nanoget-rs has never been published,
+  # so the first `cargo publish` permanently claims the name, and a published version can
+  # be yanked but never replaced. Run it by hand when that is the intent:
+  #
+  #     cargo publish --dry-run   # check the packaged crate builds
+  #     cargo publish
+  #
+  # The `exclude` list in Cargo.toml keeps the nanotest fixture submodule out of the
+  # package; `cargo package --list` should show no nanotest entries.

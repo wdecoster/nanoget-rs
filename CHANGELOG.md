@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-09-09
+
 ### Added
 - Initial Rust implementation of nanoget
 - Support for FASTQ, FASTA, BAM, CRAM, uBAM, and summary files

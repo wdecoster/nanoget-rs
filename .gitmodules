@@ -1,0 +1,4 @@
+[submodule "nanotest"]
+	path = nanotest
+	url = https://github.com/wdecoster/nanotest.git
+	shallow = true

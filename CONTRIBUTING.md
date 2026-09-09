@@ -11,11 +11,22 @@ We welcome contributions to nanoget-rs! This document provides guidelines for co
 
 2. **Setup:**
    ```bash
-   git clone https://github.com/wdecoster/nanoget-rs.git
+   git clone --recurse-submodules https://github.com/wdecoster/nanoget-rs.git
    cd nanoget-rs
    cargo build
    cargo test
    ```
+
+   The test suite runs against real ONT files from the
+   [nanotest](https://github.com/wdecoster/nanotest) repository, included as a git
+   submodule. If you cloned without `--recurse-submodules`, fetch them with:
+
+   ```bash
+   git submodule update --init --depth 1
+   ```
+
+   Tests that need the fixtures fail with that instruction rather than skipping, so a
+   missing submodule cannot quietly hide a regression.
 
 ## Development Workflow
 

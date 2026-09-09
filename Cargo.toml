@@ -1,6 +1,6 @@
 [package]
 name = "nanoget-rs"
-version = "0.1.1"
+version = "0.2.0"
 edition = "2021"
 authors = ["Wouter De Coster <decosterwouter@gmail.com>"]
 description = "Fast extraction of metrics from Oxford Nanopore sequencing data and alignments"
@@ -15,6 +15,9 @@ exclude = [
     "test_data.fastq",
     "example_library_usage.rs",
     "simple_example.rs",
+    # Test fixtures, pulled in as a git submodule. ~36 MB, and of no use to consumers.
+    "nanotest/",
+    "REVIEW-2026-09-09.md",
 ]
 
 [dependencies]

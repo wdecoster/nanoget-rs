@@ -18,9 +18,11 @@ pub enum NanogetError {
     FileNotFound(String),
 
     #[error("Unsupported file format: {0}")]
-    #[allow(dead_code)]
     UnsupportedFormat(String),
 
+    // No longer constructed: the read-type validation that raised it moved into the
+    // `ReadType` value enum, which clap rejects before extraction starts. Kept because
+    // removing a variant from a public error enum is a breaking change.
     #[error("Invalid input: {0}")]
     InvalidInput(String),
 

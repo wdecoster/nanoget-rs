@@ -1,0 +1,28 @@
+name: Security Audit
+
+on:
+  schedule:
+    # Run weekly on Sundays at 2:00 AM UTC
+    - cron: '0 2 * * 0'
+  workflow_dispatch: # Allow manual trigger
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v7
+
+    - name: Install Rust toolchain
+      uses: dtolnay/rust-toolchain@stable
+
+    # The same cargo-deny check the CI workflow runs per push, on a schedule so
+    # advisories published against unchanged dependencies surface without
+    # waiting for the next commit. cargo-deny reads the dependency graph via
+    # cargo metadata and never builds, so the htslib system packages the other
+    # jobs install are not needed here. Policy (allowed licenses, ignored
+    # advisories) lives in deny.toml so it is reviewable in one place.
+    - name: Install and run cargo-deny
+      run: |
+        cargo install cargo-deny --version "0.19.7" --locked
+        cargo deny check

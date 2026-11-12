@@ -146,3 +146,26 @@ fn test_sniff_summary_with_many_columns() {
     let path = write_plain(dir.path(), "summary_wide.txt", content.as_bytes());
     assert_eq!(FileType::sniff(&path).unwrap(), FileType::Summary);
 }
+
+/// A FIFO cannot be rewound after sniffing, so it must be refused up front with a pointer
+/// to stdin instead of an opaque "Illegal seek" (issue #82).
+#[cfg(unix)]
+#[test]
+fn fifo_input_is_rejected_with_stdin_hint() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let fifo = dir.path().join("p");
+    let c = std::ffi::CString::new(fifo.to_str().unwrap()).unwrap();
+    assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+
+    let err = FileType::sniff(&fifo).unwrap_err().to_string();
+    assert!(err.contains("not a regular file"), "{err}");
+    assert!(err.contains("stdin"), "{err}");
+
+    let out = assert_cmd::Command::cargo_bin("nanoget")
+        .unwrap()
+        .args(["extract", fifo.to_str().unwrap()])
+        .assert()
+        .failure();
+    let stderr = String::from_utf8_lossy(&out.get_output().stderr).to_string();
+    assert!(stderr.contains("stdin"), "{stderr}");
+}

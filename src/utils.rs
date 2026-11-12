@@ -19,12 +19,28 @@ fn phred_to_prob_table() -> &'static [f64; 256] {
 /// ASCII offset applied to Phred scores in FASTQ quality lines.
 const PHRED33_OFFSET: u8 = 33;
 
-/// Check if a file exists
+/// Check if a file exists and is a seekable input.
+///
+/// Pipes (FIFOs, process substitution such as `<(zcat x.gz)`) can only be read once, but
+/// format detection reads the head and then reads the file again, so they are rejected
+/// with a pointer to stdin (`-`), which is the supported way to stream.
 pub fn check_file_exists(path: &Path) -> Result<(), NanogetError> {
     if !path.exists() {
         return Err(NanogetError::FileNotFound(
             path.to_string_lossy().to_string(),
         ));
+    }
+    reject_non_seekable(path)
+}
+
+/// Error for inputs that are not regular files (pipes, FIFOs, `/dev/fd/N`).
+pub fn reject_non_seekable(path: &Path) -> Result<(), NanogetError> {
+    if !path.is_file() {
+        return Err(NanogetError::ParseError(format!(
+            "{} is not a regular file (pipe/FIFO/process substitution cannot be read twice \
+             for format detection). Stream it via stdin instead: `... | nanoget extract -`",
+            path.display()
+        )));
     }
     Ok(())
 }

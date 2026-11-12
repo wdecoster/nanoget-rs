@@ -109,6 +109,9 @@ impl FileType {
         use std::fs::File;
         use std::io::Read;
 
+        if path.exists() {
+            crate::utils::reject_non_seekable(path)?;
+        }
         let mut f = File::open(path)
             .map_err(|_| NanogetError::FileNotFound(path.to_string_lossy().to_string()))?;
 

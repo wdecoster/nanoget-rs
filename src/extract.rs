@@ -5,7 +5,7 @@ use crate::formats::FileType;
 use crate::metrics::{MetricsCollection, ReadMetrics};
 use crate::utils;
 
-use chrono::{DateTime, TimeZone, Utc};
+use jiff::Timestamp;
 use log::info;
 use rayon::prelude::*;
 use rust_htslib::bam::record::{Aux, Cigar};
@@ -18,9 +18,9 @@ use rust_htslib::htslib::{
 use std::io::Read;
 use std::path::Path;
 
-/// Safely parse a timestamp (seconds since epoch) to DateTime<Utc>
+/// Safely parse a timestamp (seconds since epoch) to a `Timestamp`
 /// Handles nanosecond overflow by clamping to valid range
-fn parse_timestamp(timestamp: f64) -> Option<DateTime<Utc>> {
+fn parse_timestamp(timestamp: f64) -> Option<Timestamp> {
     // Validate timestamp range. NaN fails every comparison, so it has to be rejected
     // explicitly — otherwise `NaN as i64` saturates to 0 and silently becomes the epoch.
     if !timestamp.is_finite() || timestamp < 0.0 || timestamp > i64::MAX as f64 {
@@ -31,7 +31,7 @@ fn parse_timestamp(timestamp: f64) -> Option<DateTime<Utc>> {
     // Clamp nanoseconds to valid u32 range (0 to 999,999,999)
     let nanos = ((timestamp.fract().abs() * 1e9) as u32).min(999_999_999);
 
-    Utc.timestamp_opt(seconds, nanos).single()
+    Timestamp::new(seconds, nanos as i32).ok()
 }
 
 /// Main entry point for extracting metrics from files
@@ -917,7 +917,7 @@ fn reconstruct_stdin_prefix(_prefix: Vec<u8>) -> Result<(), NanogetError> {
 #[derive(Debug)]
 struct RichFastqMetadata {
     channel_id: Option<u16>,
-    start_time: Option<chrono::DateTime<chrono::Utc>>,
+    start_time: Option<Timestamp>,
     duration: Option<f64>,
     run_id: Option<String>,
 }
@@ -925,9 +925,9 @@ struct RichFastqMetadata {
 /// Parse a read start time, accepting either an RFC3339 timestamp string
 /// (real ONT output, e.g. "2019-12-23T13:44:31Z" and the SAM-style "st" tag)
 /// or seconds since the Unix epoch as a float.
-fn parse_start_time(value: &str) -> Option<DateTime<Utc>> {
-    if let Ok(dt) = DateTime::parse_from_rfc3339(value) {
-        return Some(dt.with_timezone(&Utc));
+fn parse_start_time(value: &str) -> Option<Timestamp> {
+    if let Ok(ts) = value.parse::<Timestamp>() {
+        return Some(ts);
     }
     value.parse::<f64>().ok().and_then(parse_timestamp)
 }

@@ -1,7 +1,7 @@
 use crate::cli::CombineMethod;
 use crate::columns::{self, ReadColumns, ReadColumnsBuilder, ReadView};
 use crate::error::NanogetError;
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use serde::ser::{SerializeSeq, SerializeStruct};
 use serde::{Deserialize, Serialize, Serializer};
 use std::collections::BTreeMap;
@@ -42,7 +42,7 @@ pub struct ReadMetrics {
     pub channel_id: Option<u16>,
 
     /// Start time of sequencing
-    pub start_time: Option<DateTime<Utc>>,
+    pub start_time: Option<Timestamp>,
 
     /// Duration of sequencing
     pub duration: Option<f64>,
@@ -102,7 +102,7 @@ impl ReadMetrics {
     pub fn with_sequencing_metadata(
         mut self,
         channel_id: Option<u16>,
-        start_time: Option<DateTime<Utc>>,
+        start_time: Option<Timestamp>,
         duration: Option<f64>,
     ) -> Self {
         self.channel_id = channel_id;
@@ -383,7 +383,7 @@ struct SerializedRead<'a> {
     mapping_quality: Option<u8>,
     percent_identity: Option<f32>,
     channel_id: Option<u16>,
-    start_time: Option<DateTime<Utc>>,
+    start_time: Option<Timestamp>,
     duration: Option<f32>,
     barcode: Option<&'a str>,
     run_id: Option<&'a str>,
@@ -452,7 +452,7 @@ fn write_stats_comment<W: Write>(
 /// writing straight into the output rather than building a `String` per cell.
 struct OptFixed(Option<f64>);
 struct OptDisplay<T: fmt::Display>(Option<T>);
-struct OptRfc3339(Option<DateTime<Utc>>);
+struct OptRfc3339(Option<Timestamp>);
 
 impl fmt::Display for OptFixed {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -472,12 +472,38 @@ impl<T: fmt::Display> fmt::Display for OptDisplay<T> {
     }
 }
 
+/// Format a timestamp as RFC 3339 in UTC, the way the `start_time` column is written.
+///
+/// Byte-identical to what chrono's `to_rfc3339` produced before the move to jiff: a
+/// "+00:00" offset and 0, 3, 6 or 9 fractional digits, whichever is the shortest that is
+/// exact. (jiff's own `Display` writes "Z" and trims trailing zeros instead.)
+pub fn to_rfc3339(t: Timestamp) -> String {
+    let mut out = String::new();
+    // writing to a String cannot fail
+    let _ = write_rfc3339(&mut out, t);
+    out
+}
+
+fn write_rfc3339(f: &mut impl fmt::Write, t: Timestamp) -> fmt::Result {
+    write!(f, "{}", t.strftime("%Y-%m-%dT%H:%M:%S"))?;
+    let nanos = t.as_nanosecond().rem_euclid(1_000_000_000);
+    if nanos != 0 {
+        if nanos % 1_000_000 == 0 {
+            write!(f, ".{:03}", nanos / 1_000_000)?;
+        } else if nanos % 1_000 == 0 {
+            write!(f, ".{:06}", nanos / 1_000)?;
+        } else {
+            write!(f, ".{:09}", nanos)?;
+        }
+    }
+    f.write_str("+00:00")
+}
+
 impl fmt::Display for OptRfc3339 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.0 {
-            // to_rfc3339 allocates; the Display impls chrono offers do not match the
-            // previous output, so this keeps the format byte-identical.
-            Some(t) => write!(f, "{}", t.to_rfc3339()),
+            // written straight into the output rather than building a String per cell
+            Some(t) => write_rfc3339(f, t),
             None => Ok(()),
         }
     }
@@ -662,6 +688,29 @@ fn calculate_percentile(sorted_values: &[f64], percentile: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The TSV start_time column kept the byte layout chrono's `to_rfc3339` produced: a
+    /// "+00:00" offset and 0, 3, 6 or 9 fractional digits.
+    #[test]
+    fn start_time_column_is_rfc3339_with_chrono_compatible_fractions() {
+        let fmt = |secs: i64, nanos: i32| {
+            OptRfc3339(Some(Timestamp::new(secs, nanos).unwrap())).to_string()
+        };
+        assert_eq!(fmt(1_577_108_671, 0), "2019-12-23T13:44:31+00:00");
+        assert_eq!(
+            fmt(1_577_108_671, 500_000_000),
+            "2019-12-23T13:44:31.500+00:00"
+        );
+        assert_eq!(
+            fmt(1_577_108_671, 1_000),
+            "2019-12-23T13:44:31.000001+00:00"
+        );
+        assert_eq!(fmt(3733, 25_749_999), "1970-01-01T01:02:13.025749999+00:00");
+        // before the epoch jiff reports a negative sub-second part; the fraction must
+        // still be the positive offset into the second
+        assert_eq!(fmt(-1, 500_000_000), "1969-12-31T23:59:59.500+00:00");
+        assert_eq!(OptRfc3339(None).to_string(), "");
+    }
 
     #[test]
     fn test_stats_summary() {

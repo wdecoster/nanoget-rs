@@ -167,7 +167,7 @@ fn test_summary_accepts_rfc3339_start_time() {
         .unwrap()
         .start_time()
         .expect("start_time");
-    assert_eq!(start.to_rfc3339(), "2019-12-23T13:44:31+00:00");
+    assert_eq!(start.to_string(), "2019-12-23T13:44:31Z");
 }
 
 /// A record in a rich FASTQ with no metadata at all means something is wrong with the

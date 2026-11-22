@@ -58,8 +58,8 @@ libc = "0.2"
 # Statistics and math
 statrs = "0.19"
 
-# DateTime handling
-chrono = { version = "0.4", features = ["serde"] }
+# Timestamps (replaces the unmaintained chrono)
+jiff = { version = "0.2", features = ["serde"] }
 
 [dev-dependencies]
 tempfile = "3.27"

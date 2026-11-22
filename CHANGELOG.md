@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Breaking: timestamps are now `jiff::Timestamp`, not `chrono::DateTime<Utc>`.** `metrics::to_rfc3339` gives the TSV text form. chrono is
+  unmaintained (RUSTSEC-2026-0543). This affects the public `start_time` field of
+  `ReadMetrics` and `ReadView::start_time()`. Callers doing arithmetic on it need to switch,
+  e.g. `(a - b).num_seconds()` becomes `a.duration_since(b).as_secs()` (both truncate toward zero). The `start_time`
+  column in TSV output is byte-identical to before (`+00:00` offset, 0, 3, 6 or 9
+  fractional digits). In JSON, whole-second times are unchanged (`...Z`); fractional
+  seconds are now written with trailing zeros trimmed (`.5` instead of `.500`).
+
 ## [0.2.0] - 2026-09-09
 
 The first published release. 0.1.0 and 0.1.1 existed in `Cargo.toml` but were never

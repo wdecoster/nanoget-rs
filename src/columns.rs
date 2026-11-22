@@ -31,7 +31,7 @@
 //! one, reads back as `None`.
 
 use crate::metrics::ReadMetrics;
-use chrono::{DateTime, TimeZone, Utc};
+use jiff::Timestamp;
 
 /// Absent marker for `aligned_length`.
 const NO_U32: u32 = u32::MAX;
@@ -377,12 +377,12 @@ impl<'a> ReadView<'a> {
         (v != NO_CHANNEL).then_some(v)
     }
 
-    pub fn start_time(&self) -> Option<DateTime<Utc>> {
+    pub fn start_time(&self) -> Option<Timestamp> {
         let v = *self.columns.start_time.as_ref()?.get(self.index)?;
         if v == NO_TIME {
             return None;
         }
-        Utc.timestamp_nanos(v).into()
+        Timestamp::from_nanosecond(i128::from(v)).ok()
     }
 
     pub fn duration(&self) -> Option<f64> {
@@ -645,11 +645,11 @@ fn push_opt_time(
     column: &mut Option<Vec<i64>>,
     len: usize,
     capacity: usize,
-    value: Option<DateTime<Utc>>,
+    value: Option<Timestamp>,
 ) {
     // Nanoseconds since the epoch spans 1677-2262, which covers any sequencing run. A
     // timestamp outside that range is stored as absent rather than wrapping.
-    let nanos = value.and_then(|t| t.timestamp_nanos_opt());
+    let nanos = value.and_then(|t| i64::try_from(t.as_nanosecond()).ok());
     match (column.as_mut(), nanos) {
         (Some(c), v) => c.push(v.unwrap_or(NO_TIME)),
         (None, None) => {}
@@ -724,7 +724,6 @@ pub(crate) fn concat(parts: Vec<ReadColumns>) -> ReadColumns {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::TimeZone;
 
     fn row(length: u32) -> ReadMetrics {
         ReadMetrics::new(None, length)
@@ -917,7 +916,7 @@ mod tests {
 
     #[test]
     fn timestamps_survive_a_round_trip_at_nanosecond_precision() {
-        let t = Utc.timestamp_opt(3733, 25_749_999).single().unwrap();
+        let t = Timestamp::new(3733, 25_749_999).unwrap();
         let mut r = row(1);
         r.start_time = Some(t);
         let c = build(vec![r, row(2)]);
